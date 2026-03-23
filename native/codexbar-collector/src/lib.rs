@@ -1,0 +1,941 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration as StdDuration, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow, bail};
+use chrono::{DateTime, Duration, FixedOffset, Local, NaiveDate, TimeZone};
+use rusqlite::{Connection, OpenFlags};
+use serde::{Deserialize, Serialize};
+
+const CACHE_TTL_SECONDS: u64 = 15;
+
+#[derive(Debug, Clone)]
+pub struct SnapshotOptions {
+    pub now: DateTime<FixedOffset>,
+    pub use_cache: bool,
+    pub ttl: StdDuration,
+    pub paths: BuildPaths,
+}
+
+#[derive(Debug, Clone)]
+pub struct BuildPaths {
+    pub codex_home: PathBuf,
+    pub claude_stats_path: PathBuf,
+    pub antigravity_db_path: PathBuf,
+    pub cache_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelSnapshotV1 {
+    pub generated_at: String,
+    pub total_tokens: u64,
+    pub formatted_total_tokens: String,
+    pub tokens_today: u64,
+    pub tokens_7d: u64,
+    pub tokens_30d: u64,
+    pub sources: Vec<PanelSourceSnapshot>,
+    pub available_source_count: u32,
+    pub unavailable_source_count: u32,
+    pub status: SnapshotStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelSourceSnapshot {
+    pub id: SourceId,
+    pub label: String,
+    pub total_tokens: u64,
+    pub formatted_total_tokens: String,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_data_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotStatus {
+    Ok,
+    Partial,
+    Error,
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceId {
+    Codex,
+    ClaudeCode,
+    Antigravity,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+struct SourceSignatures {
+    codex_db_mtime_ms: Option<u128>,
+    claude_stats_mtime_ms: Option<u128>,
+    antigravity_db_mtime_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheEnvelope {
+    saved_at: String,
+    source_signatures: SourceSignatures,
+    snapshot: PanelSnapshotV1,
+}
+
+#[derive(Debug, Clone)]
+struct SourceSnapshot {
+    id: SourceId,
+    label: &'static str,
+    available: bool,
+    total_tokens: u64,
+    tokens_today: u64,
+    tokens_7d: u64,
+    tokens_30d: u64,
+    latest_data_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeStatsFile {
+    #[serde(default)]
+    last_computed_date: Option<String>,
+    #[serde(default)]
+    daily_model_tokens: Vec<ClaudeDailyRow>,
+    #[serde(default)]
+    model_usage: HashMap<String, ClaudeModelUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeDailyRow {
+    #[serde(default)]
+    date: Option<String>,
+    #[serde(default)]
+    tokens_by_model: HashMap<String, u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeModelUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+}
+
+impl SnapshotOptions {
+    pub fn from_paths(paths: BuildPaths) -> Self {
+        Self {
+            now: Local::now().fixed_offset(),
+            use_cache: true,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths,
+        }
+    }
+}
+
+impl Default for SnapshotOptions {
+    fn default() -> Self {
+        Self::from_paths(BuildPaths::default())
+    }
+}
+
+impl Default for BuildPaths {
+    fn default() -> Self {
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let cache_root = dirs::cache_dir().unwrap_or_else(|| home_dir.join(".cache"));
+
+        Self {
+            codex_home: std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home_dir.join(".codex")),
+            claude_stats_path: home_dir.join(".claude").join("stats-cache.json"),
+            antigravity_db_path: home_dir.join(".antigravity_tools").join("token_stats.db"),
+            cache_path: cache_root.join("codexbar").join("panel-snapshot-v1.json"),
+        }
+    }
+}
+
+pub fn load_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV1> {
+    let signatures = collect_source_signatures(&options.paths)?;
+    let cached = read_cache(&options.paths.cache_path).ok();
+
+    if options.use_cache
+        && let Some(envelope) = cached.as_ref()
+        && is_cache_valid(envelope, &signatures, options.now, options.ttl)
+    {
+        return Ok(envelope.snapshot.clone());
+    }
+
+    match build_fresh_snapshot(options) {
+        Ok(snapshot) => {
+            if options.use_cache
+                && let Err(error) =
+                    write_cache(&options.paths.cache_path, &signatures, &snapshot, options.now)
+            {
+                eprintln!("codexbar-collector: failed to write cache: {error}");
+            }
+
+            Ok(snapshot)
+        }
+        Err(error) => {
+            if let Some(mut envelope) = cached {
+                envelope.snapshot.status = SnapshotStatus::Stale;
+                envelope.snapshot.error = Some(error.to_string());
+                return Ok(envelope.snapshot);
+            }
+
+            Err(error)
+        }
+    }
+}
+
+pub fn build_fresh_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV1> {
+    let mut sources = Vec::new();
+
+    sources.push(read_source_safely(SourceId::Codex, || {
+        read_codex_source(&options.paths.codex_home, options.now)
+    }));
+    sources.push(read_source_safely(SourceId::ClaudeCode, || {
+        read_claude_source(&options.paths.claude_stats_path, options.now)
+    }));
+    sources.push(read_source_safely(SourceId::Antigravity, || {
+        read_antigravity_source(&options.paths.antigravity_db_path, options.now)
+    }));
+
+    if sources.iter().all(|source| !source.available) {
+        bail!("No panel sources are available");
+    }
+
+    let total_tokens = sources.iter().map(|source| source.total_tokens).sum();
+    let tokens_today = sources.iter().map(|source| source.tokens_today).sum();
+    let tokens_7d = sources.iter().map(|source| source.tokens_7d).sum();
+    let tokens_30d = sources.iter().map(|source| source.tokens_30d).sum();
+    let unavailable_source_count = sources.iter().filter(|source| !source.available).count() as u32;
+    let available_source_count = sources.len() as u32 - unavailable_source_count;
+
+    Ok(PanelSnapshotV1 {
+        generated_at: options.now.to_rfc3339(),
+        total_tokens,
+        formatted_total_tokens: format_token_count(total_tokens),
+        tokens_today,
+        tokens_7d,
+        tokens_30d,
+        sources: sources
+            .into_iter()
+            .map(|source| PanelSourceSnapshot {
+                id: source.id,
+                label: source.label.to_string(),
+                total_tokens: source.total_tokens,
+                formatted_total_tokens: format_token_count(source.total_tokens),
+                available: source.available,
+                latest_data_at: source.latest_data_at,
+            })
+            .collect(),
+        available_source_count,
+        unavailable_source_count,
+        status: if unavailable_source_count == 0 {
+            SnapshotStatus::Ok
+        } else {
+            SnapshotStatus::Partial
+        },
+        error: None,
+    })
+}
+
+fn read_source_safely(
+    source_id: SourceId,
+    reader: impl FnOnce() -> Result<SourceSnapshot>,
+) -> SourceSnapshot {
+    match reader() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("codexbar-collector: {} unavailable: {error}", source_id.label());
+            SourceSnapshot {
+                id: source_id,
+                label: source_id.label(),
+                available: false,
+                total_tokens: 0,
+                tokens_today: 0,
+                tokens_7d: 0,
+                tokens_30d: 0,
+                latest_data_at: None,
+            }
+        }
+    }
+}
+
+fn read_codex_source(codex_home: &Path, now: DateTime<FixedOffset>) -> Result<SourceSnapshot> {
+    if !codex_home.exists() {
+        bail!("Codex home not found: {}", codex_home.display());
+    }
+
+    let db_path = find_latest_state_db(codex_home)?;
+    let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("Failed to open Codex database {}", db_path.display()))?;
+    let window = day_window(now);
+
+    let total_tokens: u64 = db
+        .query_row(
+            "SELECT COALESCE(SUM(tokens_used), 0) FROM threads",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .context("Failed to query Codex total tokens")?
+        .max(0) as u64;
+
+    let (tokens_today, tokens_7d, tokens_30d): (u64, u64, u64) = db
+        .query_row(
+            "
+            SELECT
+              COALESCE(SUM(CASE WHEN updated_at >= ?1 THEN tokens_used ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN updated_at >= ?2 THEN tokens_used ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN updated_at >= ?3 THEN tokens_used ELSE 0 END), 0)
+            FROM threads
+            ",
+            (
+                window.today_start.timestamp(),
+                window.day7_start.timestamp(),
+                window.day30_start.timestamp(),
+            ),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?.max(0) as u64,
+                    row.get::<_, i64>(1)?.max(0) as u64,
+                    row.get::<_, i64>(2)?.max(0) as u64,
+                ))
+            },
+        )
+        .context("Failed to query Codex time windows")?;
+
+    let latest_timestamp = db
+        .query_row("SELECT MAX(updated_at) FROM threads", [], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .context("Failed to query Codex latest timestamp")?;
+
+    Ok(SourceSnapshot {
+        id: SourceId::Codex,
+        label: SourceId::Codex.label(),
+        available: true,
+        total_tokens,
+        tokens_today,
+        tokens_7d,
+        tokens_30d,
+        latest_data_at: latest_timestamp.map(|timestamp| iso_from_unix(timestamp, now.offset())),
+    })
+}
+
+fn read_claude_source(stats_path: &Path, now: DateTime<FixedOffset>) -> Result<SourceSnapshot> {
+    if !stats_path.exists() {
+        bail!("Claude stats file not found: {}", stats_path.display());
+    }
+
+    let raw = fs::read_to_string(stats_path)
+        .with_context(|| format!("Failed to read Claude stats {}", stats_path.display()))?;
+    if raw.trim().is_empty() {
+        bail!("Claude stats file is empty: {}", stats_path.display());
+    }
+
+    let parsed: ClaudeStatsFile =
+        serde_json::from_str(&raw).context("Failed to parse Claude stats JSON")?;
+    let window = day_window(now);
+    let mut tokens_today = 0_u64;
+    let mut tokens_7d = 0_u64;
+    let mut tokens_30d = 0_u64;
+    let mut latest_data_at = parsed
+        .last_computed_date
+        .as_deref()
+        .and_then(|date| iso_from_day(date, now.offset()));
+
+    for row in &parsed.daily_model_tokens {
+        let Some(day) = row.date.as_deref() else {
+            continue;
+        };
+        let Ok(day_value) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
+            continue;
+        };
+        let tokens = row.tokens_by_model.values().copied().sum::<u64>();
+
+        if day_value == window.today_start.date_naive() {
+            tokens_today += tokens;
+        }
+        if day_value >= window.day7_start.date_naive() {
+            tokens_7d += tokens;
+        }
+        if day_value >= window.day30_start.date_naive() {
+            tokens_30d += tokens;
+        }
+
+        if let Some(candidate) = iso_from_day(day, now.offset()) {
+            if latest_data_at.as_ref().is_none_or(|current| candidate > *current) {
+                latest_data_at = Some(candidate);
+            }
+        }
+    }
+
+    let total_tokens = parsed
+        .model_usage
+        .values()
+        .map(|usage| {
+            usage.input_tokens
+                + usage.output_tokens
+                + usage.cache_read_input_tokens
+                + usage.cache_creation_input_tokens
+        })
+        .sum();
+
+    Ok(SourceSnapshot {
+        id: SourceId::ClaudeCode,
+        label: SourceId::ClaudeCode.label(),
+        available: true,
+        total_tokens,
+        tokens_today,
+        tokens_7d,
+        tokens_30d,
+        latest_data_at,
+    })
+}
+
+fn read_antigravity_source(
+    db_path: &Path,
+    now: DateTime<FixedOffset>,
+) -> Result<SourceSnapshot> {
+    if !db_path.exists() {
+        bail!("Antigravity token database not found: {}", db_path.display());
+    }
+
+    let db = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("Failed to open Antigravity database {}", db_path.display()))?;
+    let window = day_window(now);
+
+    let (total_tokens, tokens_today, tokens_7d, tokens_30d, latest_timestamp): (
+        u64,
+        u64,
+        u64,
+        u64,
+        Option<i64>,
+    ) = db
+        .query_row(
+            "
+            SELECT
+              COALESCE(SUM(total_tokens), 0),
+              COALESCE(SUM(CASE WHEN timestamp >= ?1 THEN total_tokens ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN timestamp >= ?2 THEN total_tokens ELSE 0 END), 0),
+              COALESCE(SUM(CASE WHEN timestamp >= ?3 THEN total_tokens ELSE 0 END), 0),
+              MAX(timestamp)
+            FROM token_usage
+            ",
+            (
+                window.today_start.timestamp(),
+                window.day7_start.timestamp(),
+                window.day30_start.timestamp(),
+            ),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?.max(0) as u64,
+                    row.get::<_, i64>(1)?.max(0) as u64,
+                    row.get::<_, i64>(2)?.max(0) as u64,
+                    row.get::<_, i64>(3)?.max(0) as u64,
+                    row.get::<_, Option<i64>>(4)?,
+                ))
+            },
+        )
+        .context("Failed to query Antigravity token usage")?;
+
+    Ok(SourceSnapshot {
+        id: SourceId::Antigravity,
+        label: SourceId::Antigravity.label(),
+        available: true,
+        total_tokens,
+        tokens_today,
+        tokens_7d,
+        tokens_30d,
+        latest_data_at: latest_timestamp.map(|timestamp| iso_from_unix(timestamp, now.offset())),
+    })
+}
+
+fn collect_source_signatures(paths: &BuildPaths) -> Result<SourceSignatures> {
+    Ok(SourceSignatures {
+        codex_db_mtime_ms: file_modified_ms(find_latest_state_db(&paths.codex_home).ok().as_deref())?,
+        claude_stats_mtime_ms: file_modified_ms(Some(paths.claude_stats_path.as_path()))?,
+        antigravity_db_mtime_ms: file_modified_ms(Some(paths.antigravity_db_path.as_path()))?,
+    })
+}
+
+fn file_modified_ms(path: Option<&Path>) -> Result<Option<u128>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let modified = fs::metadata(path)
+        .with_context(|| format!("Failed to stat {}", path.display()))?
+        .modified()
+        .with_context(|| format!("Failed to read mtime for {}", path.display()))?;
+
+    Ok(Some(
+        modified
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|_| StdDuration::from_secs(0))
+            .as_millis(),
+    ))
+}
+
+fn write_cache(
+    cache_path: &Path,
+    signatures: &SourceSignatures,
+    snapshot: &PanelSnapshotV1,
+    now: DateTime<FixedOffset>,
+) -> Result<()> {
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create cache directory {}", parent.display()))?;
+    }
+
+    let payload = CacheEnvelope {
+        saved_at: now.to_rfc3339(),
+        source_signatures: signatures.clone(),
+        snapshot: snapshot.clone(),
+    };
+
+    let serialized = serde_json::to_string_pretty(&payload).context("Failed to encode cache JSON")?;
+    let temp_path = cache_path.with_extension("tmp");
+    fs::write(&temp_path, serialized)
+        .with_context(|| format!("Failed to write {}", temp_path.display()))?;
+    fs::rename(&temp_path, cache_path)
+        .with_context(|| format!("Failed to move cache into {}", cache_path.display()))?;
+
+    Ok(())
+}
+
+fn read_cache(cache_path: &Path) -> Result<CacheEnvelope> {
+    let raw = fs::read_to_string(cache_path)
+        .with_context(|| format!("Failed to read {}", cache_path.display()))?;
+    serde_json::from_str(&raw).context("Failed to parse cache JSON")
+}
+
+fn is_cache_valid(
+    envelope: &CacheEnvelope,
+    signatures: &SourceSignatures,
+    now: DateTime<FixedOffset>,
+    ttl: StdDuration,
+) -> bool {
+    if envelope.source_signatures != *signatures {
+        return false;
+    }
+
+    let Ok(saved_at) = DateTime::parse_from_rfc3339(&envelope.saved_at) else {
+        return false;
+    };
+
+    let Ok(max_age) = Duration::from_std(ttl) else {
+        return false;
+    };
+
+    now.signed_duration_since(saved_at) < max_age
+}
+
+fn format_token_count(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+
+    out.chars().rev().collect()
+}
+
+fn find_latest_state_db(codex_home: &Path) -> Result<PathBuf> {
+    let entries = fs::read_dir(codex_home)
+        .with_context(|| format!("Failed to read {}", codex_home.display()))?;
+    let mut matches: Vec<(u64, PathBuf)> = Vec::new();
+
+    for entry in entries {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+
+        if let Some(number) = file_name
+            .strip_prefix("state_")
+            .and_then(|suffix| suffix.strip_suffix(".sqlite"))
+            .and_then(|suffix| suffix.parse::<u64>().ok())
+        {
+            matches.push((number, entry.path()));
+        }
+    }
+
+    matches.sort_by(|left, right| right.0.cmp(&left.0));
+    matches
+        .into_iter()
+        .next()
+        .map(|(_, path)| path)
+        .ok_or_else(|| anyhow!("No state_*.sqlite database found in {}", codex_home.display()))
+}
+
+fn iso_from_unix(timestamp: i64, offset: &FixedOffset) -> String {
+    offset
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .unwrap_or_else(|| offset.timestamp_millis_opt(0).single().expect("epoch timestamp"))
+        .to_rfc3339()
+}
+
+fn iso_from_day(day: &str, offset: &FixedOffset) -> Option<String> {
+    let day = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
+    let end_of_day = day.and_hms_opt(23, 59, 59)?;
+    Some(offset.from_local_datetime(&end_of_day).single()?.to_rfc3339())
+}
+
+struct DayWindow {
+    today_start: DateTime<FixedOffset>,
+    day7_start: DateTime<FixedOffset>,
+    day30_start: DateTime<FixedOffset>,
+}
+
+fn day_window(now: DateTime<FixedOffset>) -> DayWindow {
+    let start_naive = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("valid midnight timestamp");
+    let today_start = now
+        .offset()
+        .from_local_datetime(&start_naive)
+        .single()
+        .expect("fixed offset midnight");
+
+    DayWindow {
+        today_start,
+        day7_start: today_start - Duration::days(6),
+        day30_start: today_start - Duration::days(29),
+    }
+}
+
+impl SourceId {
+    fn label(self) -> &'static str {
+        match self {
+            SourceId::Codex => "Codex",
+            SourceId::ClaudeCode => "Claude Code",
+            SourceId::Antigravity => "Antigravity",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs::File;
+    use std::io::Write;
+
+    use rusqlite::params;
+    use tempfile::TempDir;
+
+    fn test_now() -> DateTime<FixedOffset> {
+        DateTime::parse_from_rfc3339("2026-03-22T12:00:00+08:00").expect("valid timestamp")
+    }
+
+    fn build_test_paths(root: &TempDir) -> BuildPaths {
+        BuildPaths {
+            codex_home: root.path().join(".codex"),
+            claude_stats_path: root.path().join(".claude").join("stats-cache.json"),
+            antigravity_db_path: root.path().join(".antigravity_tools").join("token_stats.db"),
+            cache_path: root.path().join(".cache").join("panel-snapshot-v1.json"),
+        }
+    }
+
+    fn unix(value: &str) -> i64 {
+        DateTime::parse_from_rfc3339(value)
+            .expect("valid timestamp")
+            .timestamp()
+    }
+
+    fn create_codex_fixture(root: &TempDir) -> Result<()> {
+        let codex_home = root.path().join(".codex");
+        fs::create_dir_all(&codex_home)?;
+
+        let db = Connection::open(codex_home.join("state_1.sqlite"))?;
+        db.execute_batch(
+            "
+            CREATE TABLE threads (
+              id TEXT PRIMARY KEY,
+              rollout_path TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              source TEXT NOT NULL,
+              model_provider TEXT NOT NULL,
+              cwd TEXT NOT NULL,
+              title TEXT NOT NULL,
+              sandbox_policy TEXT NOT NULL,
+              approval_mode TEXT NOT NULL,
+              tokens_used INTEGER NOT NULL DEFAULT 0,
+              has_user_event INTEGER NOT NULL DEFAULT 0,
+              archived INTEGER NOT NULL DEFAULT 0,
+              archived_at INTEGER,
+              git_sha TEXT,
+              git_branch TEXT,
+              git_origin_url TEXT,
+              cli_version TEXT NOT NULL DEFAULT '',
+              first_user_message TEXT NOT NULL DEFAULT '',
+              agent_nickname TEXT,
+              agent_role TEXT,
+              memory_mode TEXT NOT NULL DEFAULT 'enabled'
+            );
+            ",
+        )?;
+
+        db.execute(
+            "
+            INSERT INTO threads (
+              id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+              sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at,
+              git_sha, git_branch, git_origin_url, cli_version, first_user_message, agent_nickname,
+              agent_role, memory_mode
+            ) VALUES (?1, ?2, ?3, ?4, 'local', 'openai', '/workspace/alpha', 'Active thread',
+              'workspace-write', 'never', ?5, 1, 0, NULL, NULL, NULL, NULL, '1.0.0', 'hello',
+              NULL, NULL, 'enabled')
+            ",
+            params![
+                "thread-1",
+                codex_home.join("session.jsonl").display().to_string(),
+                unix("2026-03-22T09:50:00+08:00"),
+                unix("2026-03-22T10:00:00+08:00"),
+                200_i64,
+            ],
+        )?;
+        db.execute(
+            "
+            INSERT INTO threads (
+              id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+              sandbox_policy, approval_mode, tokens_used, has_user_event, archived, archived_at,
+              git_sha, git_branch, git_origin_url, cli_version, first_user_message, agent_nickname,
+              agent_role, memory_mode
+            ) VALUES (?1, ?2, ?3, ?4, 'local', 'openai', '/workspace/beta', 'Archived thread',
+              'workspace-write', 'never', ?5, 1, 1, ?6, NULL, NULL, NULL, '1.0.0', 'hi',
+              NULL, NULL, 'enabled')
+            ",
+            params![
+                "thread-2",
+                codex_home.join("session.jsonl").display().to_string(),
+                unix("2026-03-20T09:00:00+08:00"),
+                unix("2026-03-20T09:00:00+08:00"),
+                100_i64,
+                unix("2026-03-21T09:00:00+08:00"),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    fn create_claude_fixture(root: &TempDir) -> Result<()> {
+        let claude_dir = root.path().join(".claude");
+        fs::create_dir_all(&claude_dir)?;
+        fs::write(
+            claude_dir.join("stats-cache.json"),
+            serde_json::json!({
+                "version": 1,
+                "lastComputedDate": "2026-03-22",
+                "dailyModelTokens": [
+                    {
+                        "date": "2026-03-22",
+                        "tokensByModel": { "opus": 50 }
+                    },
+                    {
+                        "date": "2026-03-21",
+                        "tokensByModel": { "opus": 40 }
+                    },
+                    {
+                        "date": "2026-03-01",
+                        "tokensByModel": { "opus": 10 }
+                    }
+                ],
+                "modelUsage": {
+                    "opus": {
+                        "inputTokens": 100,
+                        "outputTokens": 20,
+                        "cacheReadInputTokens": 30,
+                        "cacheCreationInputTokens": 10
+                    }
+                }
+            })
+            .to_string(),
+        )?;
+
+        Ok(())
+    }
+
+    fn create_antigravity_fixture(root: &TempDir) -> Result<()> {
+        let db_dir = root.path().join(".antigravity_tools");
+        fs::create_dir_all(&db_dir)?;
+        let db = Connection::open(db_dir.join("token_stats.db"))?;
+        db.execute_batch(
+            "
+            CREATE TABLE token_usage (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              timestamp INTEGER NOT NULL,
+              account_email TEXT NOT NULL,
+              model TEXT NOT NULL,
+              input_tokens INTEGER NOT NULL DEFAULT 0,
+              output_tokens INTEGER NOT NULL DEFAULT 0,
+              total_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            ",
+        )?;
+        db.execute(
+            "INSERT INTO token_usage (timestamp, account_email, model, input_tokens, output_tokens, total_tokens)
+             VALUES (?1, 'user@example.com', 'antigravity-model', 20, 50, 70)",
+            [unix("2026-03-22T08:00:00+08:00")],
+        )?;
+        db.execute(
+            "INSERT INTO token_usage (timestamp, account_email, model, input_tokens, output_tokens, total_tokens)
+             VALUES (?1, 'user@example.com', 'antigravity-model', 10, 20, 30)",
+            [unix("2026-03-10T08:00:00+08:00")],
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_fresh_snapshot_merges_sources_and_formats_counts() -> Result<()> {
+        let root = TempDir::new()?;
+        create_codex_fixture(&root)?;
+        create_claude_fixture(&root)?;
+        create_antigravity_fixture(&root)?;
+        let paths = build_test_paths(&root);
+
+        let snapshot = build_fresh_snapshot(&SnapshotOptions {
+            now: test_now(),
+            use_cache: false,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths,
+        })?;
+
+        assert_eq!(snapshot.total_tokens, 560);
+        assert_eq!(snapshot.formatted_total_tokens, "560");
+        assert_eq!(snapshot.tokens_today, 320);
+        assert_eq!(snapshot.tokens_7d, 460);
+        assert_eq!(snapshot.tokens_30d, 500);
+        assert_eq!(snapshot.available_source_count, 3);
+        assert_eq!(snapshot.unavailable_source_count, 0);
+        assert_eq!(snapshot.status, SnapshotStatus::Ok);
+        assert_eq!(
+            snapshot.sources.iter().map(|source| source.total_tokens).collect::<Vec<_>>(),
+            vec![300, 160, 100]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn build_fresh_snapshot_marks_missing_sources_as_partial() -> Result<()> {
+        let root = TempDir::new()?;
+        create_claude_fixture(&root)?;
+        let broken_antigravity_dir = root.path().join(".antigravity_tools");
+        fs::create_dir_all(&broken_antigravity_dir)?;
+        fs::write(broken_antigravity_dir.join("token_stats.db"), "not a sqlite database")?;
+
+        let snapshot = build_fresh_snapshot(&SnapshotOptions {
+            now: test_now(),
+            use_cache: false,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths: build_test_paths(&root),
+        })?;
+
+        assert_eq!(snapshot.total_tokens, 160);
+        assert_eq!(snapshot.tokens_today, 50);
+        assert_eq!(snapshot.available_source_count, 1);
+        assert_eq!(snapshot.unavailable_source_count, 2);
+        assert_eq!(snapshot.status, SnapshotStatus::Partial);
+        assert_eq!(snapshot.sources[0].available, false);
+        assert_eq!(snapshot.sources[1].available, true);
+        assert_eq!(snapshot.sources[2].available, false);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cache_validation_and_stale_fallback_work() -> Result<()> {
+        let root = TempDir::new()?;
+        create_codex_fixture(&root)?;
+        create_claude_fixture(&root)?;
+        create_antigravity_fixture(&root)?;
+        let paths = build_test_paths(&root);
+
+        let snapshot = load_snapshot(&SnapshotOptions {
+            now: test_now(),
+            use_cache: true,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths: paths.clone(),
+        })?;
+        assert_eq!(snapshot.total_tokens, 560);
+
+        let cache = read_cache(&paths.cache_path)?;
+        let signatures = collect_source_signatures(&paths)?;
+        assert!(is_cache_valid(
+            &cache,
+            &signatures,
+            test_now() + Duration::seconds(5),
+            StdDuration::from_secs(CACHE_TTL_SECONDS)
+        ));
+
+        fs::remove_file(&paths.codex_home.join("state_1.sqlite"))?;
+        fs::remove_file(&paths.claude_stats_path)?;
+        fs::remove_file(&paths.antigravity_db_path)?;
+
+        let stale_snapshot = load_snapshot(&SnapshotOptions {
+            now: test_now() + Duration::seconds(20),
+            use_cache: true,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths,
+        })?;
+
+        assert_eq!(stale_snapshot.status, SnapshotStatus::Stale);
+        assert_eq!(stale_snapshot.total_tokens, 560);
+        assert!(stale_snapshot
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("No panel sources are available")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn format_token_count_inserts_grouping_separators() {
+        assert_eq!(format_token_count(5_335_479_211), "5,335,479,211");
+    }
+
+    #[test]
+    fn signatures_change_when_source_mtime_changes() -> Result<()> {
+        let root = TempDir::new()?;
+        create_claude_fixture(&root)?;
+        let paths = build_test_paths(&root);
+        let before = collect_source_signatures(&paths)?;
+
+        std::thread::sleep(StdDuration::from_secs(1));
+        let mut file = File::options().append(true).open(&paths.claude_stats_path)?;
+        writeln!(file, " ")?;
+        file.sync_all()?;
+
+        let after = collect_source_signatures(&paths)?;
+        assert_ne!(before.claude_stats_mtime_ms, after.claude_stats_mtime_ms);
+
+        Ok(())
+    }
+}

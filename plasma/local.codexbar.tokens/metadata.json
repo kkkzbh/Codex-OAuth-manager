@@ -1,0 +1,24 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Authors": [
+      {
+        "Email": "local@codexbar",
+        "Name": "Codex"
+      }
+    ],
+    "Category": "Utilities",
+    "Description": "Shows local token totals from Codex, Claude Code, and Antigravity.",
+    "Description[zh_CN]": "显示 Codex、Claude Code 和 Antigravity 的本地 Token 总量。",
+    "EnabledByDefault": false,
+    "FormFactors": [
+      "desktop"
+    ],
+    "Icon": "utilities-terminal",
+    "Id": "local.codexbar.tokens",
+    "License": "MIT",
+    "Name": "CodexBar Tokens",
+    "Name[zh_CN]": "CodexBar Tokens"
+  },
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

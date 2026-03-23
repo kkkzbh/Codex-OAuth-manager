@@ -1,0 +1,10 @@
+*.log
+*.local
+.DS_Store
+.idea
+.vscode/*
+!.vscode/extensions.json
+node_modules/
+dist/
+dist-server/
+native/**/target/
