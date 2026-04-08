@@ -1,3 +1,5 @@
+pub mod accounts;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,7 @@ pub struct SnapshotOptions {
 #[derive(Debug, Clone)]
 pub struct BuildPaths {
     pub codex_home: PathBuf,
+    pub extra_codex_homes: Vec<PathBuf>,
     pub claude_stats_path: PathBuf,
     pub antigravity_db_path: PathBuf,
     pub cache_path: PathBuf,
@@ -76,8 +79,17 @@ pub enum SourceId {
 #[serde(rename_all = "camelCase")]
 struct SourceSignatures {
     codex_db_mtime_ms: Option<u128>,
+    #[serde(default)]
+    extra_codex_db_signatures: Vec<CodexDbSignature>,
     claude_stats_mtime_ms: Option<u128>,
     antigravity_db_mtime_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct CodexDbSignature {
+    path: String,
+    mtime_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +171,7 @@ impl Default for BuildPaths {
             codex_home: std::env::var_os("CODEX_HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir.join(".codex")),
+            extra_codex_homes: default_extra_codex_homes(),
             claude_stats_path: home_dir.join(".claude").join("stats-cache.json"),
             antigravity_db_path: home_dir.join(".antigravity_tools").join("token_stats.db"),
             cache_path: cache_root.join("codexbar").join("panel-snapshot-v1.json"),
@@ -204,7 +217,11 @@ pub fn build_fresh_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV1
     let mut sources = Vec::new();
 
     sources.push(read_source_safely(SourceId::Codex, || {
-        read_codex_source(&options.paths.codex_home, options.now)
+        read_codex_source(
+            &options.paths.codex_home,
+            &options.paths.extra_codex_homes,
+            options.now,
+        )
     }));
     sources.push(read_source_safely(SourceId::ClaudeCode, || {
         read_claude_source(&options.paths.claude_stats_path, options.now)
@@ -275,7 +292,85 @@ fn read_source_safely(
     }
 }
 
-fn read_codex_source(codex_home: &Path, now: DateTime<FixedOffset>) -> Result<SourceSnapshot> {
+fn read_codex_source(
+    codex_home: &Path,
+    extra_codex_homes: &[PathBuf],
+    now: DateTime<FixedOffset>,
+) -> Result<SourceSnapshot> {
+    let mut codex_homes = Vec::with_capacity(1 + extra_codex_homes.len());
+    codex_homes.push(codex_home.to_path_buf());
+    codex_homes.extend(extra_codex_homes.iter().cloned());
+    codex_homes = dedupe_paths(codex_homes);
+
+    let mut total_tokens = 0_u64;
+    let mut tokens_today = 0_u64;
+    let mut tokens_7d = 0_u64;
+    let mut tokens_30d = 0_u64;
+    let mut latest_timestamp: Option<i64> = None;
+    let mut loaded_count = 0_u32;
+    let mut attempted_count = 0_u32;
+
+    for home in &codex_homes {
+        if !home.exists() {
+            continue;
+        }
+
+        attempted_count += 1;
+        match read_single_codex_home(home, now) {
+            Ok(snapshot) => {
+                loaded_count += 1;
+                total_tokens += snapshot.total_tokens;
+                tokens_today += snapshot.tokens_today;
+                tokens_7d += snapshot.tokens_7d;
+                tokens_30d += snapshot.tokens_30d;
+                if latest_timestamp.is_none_or(|current| snapshot.latest_timestamp > current) {
+                    latest_timestamp = Some(snapshot.latest_timestamp);
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "codexbar-collector: skipped Codex home {}: {error:#}",
+                    home.display()
+                );
+            }
+        }
+    }
+
+    if loaded_count == 0 {
+        if attempted_count == 0 {
+            bail!(
+                "No Codex homes found. Checked: {}",
+                codex_homes
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        bail!("No usable Codex databases found");
+    }
+
+    Ok(SourceSnapshot {
+        id: SourceId::Codex,
+        label: SourceId::Codex.label(),
+        available: true,
+        total_tokens,
+        tokens_today,
+        tokens_7d,
+        tokens_30d,
+        latest_data_at: latest_timestamp.map(|timestamp| iso_from_unix(timestamp, now.offset())),
+    })
+}
+
+struct CodexHomeSnapshot {
+    total_tokens: u64,
+    tokens_today: u64,
+    tokens_7d: u64,
+    tokens_30d: u64,
+    latest_timestamp: i64,
+}
+
+fn read_single_codex_home(codex_home: &Path, now: DateTime<FixedOffset>) -> Result<CodexHomeSnapshot> {
     if !codex_home.exists() {
         bail!("Codex home not found: {}", codex_home.display());
     }
@@ -322,17 +417,15 @@ fn read_codex_source(codex_home: &Path, now: DateTime<FixedOffset>) -> Result<So
         .query_row("SELECT MAX(updated_at) FROM threads", [], |row| {
             row.get::<_, Option<i64>>(0)
         })
-        .context("Failed to query Codex latest timestamp")?;
+        .context("Failed to query Codex latest timestamp")?
+        .ok_or_else(|| anyhow!("Codex threads table is empty in {}", db_path.display()))?;
 
-    Ok(SourceSnapshot {
-        id: SourceId::Codex,
-        label: SourceId::Codex.label(),
-        available: true,
+    Ok(CodexHomeSnapshot {
         total_tokens,
         tokens_today,
         tokens_7d,
         tokens_30d,
-        latest_data_at: latest_timestamp.map(|timestamp| iso_from_unix(timestamp, now.offset())),
+        latest_timestamp,
     })
 }
 
@@ -468,9 +561,24 @@ fn read_antigravity_source(
 fn collect_source_signatures(paths: &BuildPaths) -> Result<SourceSignatures> {
     Ok(SourceSignatures {
         codex_db_mtime_ms: file_modified_ms(find_latest_state_db(&paths.codex_home).ok().as_deref())?,
+        extra_codex_db_signatures: collect_extra_codex_signatures(&paths.extra_codex_homes)?,
         claude_stats_mtime_ms: file_modified_ms(Some(paths.claude_stats_path.as_path()))?,
         antigravity_db_mtime_ms: file_modified_ms(Some(paths.antigravity_db_path.as_path()))?,
     })
+}
+
+fn collect_extra_codex_signatures(extra_codex_homes: &[PathBuf]) -> Result<Vec<CodexDbSignature>> {
+    let mut signatures = Vec::new();
+
+    for home in dedupe_paths(extra_codex_homes.to_vec()) {
+        let db_path = find_latest_state_db(&home).ok();
+        signatures.push(CodexDbSignature {
+            path: home.display().to_string(),
+            mtime_ms: file_modified_ms(db_path.as_deref())?,
+        });
+    }
+
+    Ok(signatures)
 }
 
 fn file_modified_ms(path: Option<&Path>) -> Result<Option<u128>> {
@@ -561,6 +669,44 @@ fn format_token_count(value: u64) -> String {
     }
 
     out.chars().rev().collect()
+}
+
+fn default_extra_codex_homes() -> Vec<PathBuf> {
+    let mut paths = std::env::var_os("CODEXBAR_EXTRA_CODEX_HOMES")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    paths.extend(discover_windows_codex_homes());
+    dedupe_paths(paths)
+}
+
+fn discover_windows_codex_homes() -> Vec<PathBuf> {
+    let users_dir = Path::new("/mnt/c/Users");
+    let Ok(entries) = fs::read_dir(users_dir) else {
+        return Vec::new();
+    };
+
+    let mut homes = Vec::new();
+    for entry in entries.flatten() {
+        let candidate = entry.path().join(".codex");
+        if find_latest_state_db(&candidate).is_ok() {
+            homes.push(candidate);
+        }
+    }
+
+    homes
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut unique = Vec::new();
+
+    for path in paths {
+        if !unique.iter().any(|existing| existing == &path) {
+            unique.push(path);
+        }
+    }
+
+    unique
 }
 
 fn find_latest_state_db(codex_home: &Path) -> Result<PathBuf> {
@@ -655,6 +801,7 @@ mod tests {
     fn build_test_paths(root: &TempDir) -> BuildPaths {
         BuildPaths {
             codex_home: root.path().join(".codex"),
+            extra_codex_homes: Vec::new(),
             claude_stats_path: root.path().join(".claude").join("stats-cache.json"),
             antigravity_db_path: root.path().join(".antigravity_tools").join("token_stats.db"),
             cache_path: root.path().join(".cache").join("panel-snapshot-v1.json"),
@@ -668,8 +815,11 @@ mod tests {
     }
 
     fn create_codex_fixture(root: &TempDir) -> Result<()> {
-        let codex_home = root.path().join(".codex");
-        fs::create_dir_all(&codex_home)?;
+        create_codex_fixture_at(&root.path().join(".codex"), 200, 100)
+    }
+
+    fn create_codex_fixture_at(codex_home: &Path, active_tokens: i64, archived_tokens: i64) -> Result<()> {
+        fs::create_dir_all(codex_home)?;
 
         let db = Connection::open(codex_home.join("state_1.sqlite"))?;
         db.execute_batch(
@@ -717,7 +867,7 @@ mod tests {
                 codex_home.join("session.jsonl").display().to_string(),
                 unix("2026-03-22T09:50:00+08:00"),
                 unix("2026-03-22T10:00:00+08:00"),
-                200_i64,
+                active_tokens,
             ],
         )?;
         db.execute(
@@ -736,7 +886,7 @@ mod tests {
                 codex_home.join("session.jsonl").display().to_string(),
                 unix("2026-03-20T09:00:00+08:00"),
                 unix("2026-03-20T09:00:00+08:00"),
-                100_i64,
+                archived_tokens,
                 unix("2026-03-21T09:00:00+08:00"),
             ],
         )?;
@@ -844,6 +994,34 @@ mod tests {
     }
 
     #[test]
+    fn build_fresh_snapshot_aggregates_multiple_codex_homes() -> Result<()> {
+        let root = TempDir::new()?;
+        create_codex_fixture(&root)?;
+        let windows_codex_home = root.path().join("mnt").join("c").join("Users").join("k").join(".codex");
+        create_codex_fixture_at(&windows_codex_home, 40, 20)?;
+        create_claude_fixture(&root)?;
+        create_antigravity_fixture(&root)?;
+
+        let mut paths = build_test_paths(&root);
+        paths.extra_codex_homes.push(windows_codex_home);
+
+        let snapshot = build_fresh_snapshot(&SnapshotOptions {
+            now: test_now(),
+            use_cache: false,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths,
+        })?;
+
+        assert_eq!(snapshot.total_tokens, 620);
+        assert_eq!(snapshot.tokens_today, 360);
+        assert_eq!(snapshot.tokens_7d, 520);
+        assert_eq!(snapshot.tokens_30d, 560);
+        assert_eq!(snapshot.sources[0].total_tokens, 360);
+
+        Ok(())
+    }
+
+    #[test]
     fn build_fresh_snapshot_marks_missing_sources_as_partial() -> Result<()> {
         let root = TempDir::new()?;
         create_claude_fixture(&root)?;
@@ -935,6 +1113,24 @@ mod tests {
 
         let after = collect_source_signatures(&paths)?;
         assert_ne!(before.claude_stats_mtime_ms, after.claude_stats_mtime_ms);
+
+        Ok(())
+    }
+
+    #[test]
+    fn signatures_include_extra_codex_homes() -> Result<()> {
+        let root = TempDir::new()?;
+        create_codex_fixture(&root)?;
+        let extra_home = root.path().join("windows").join(".codex");
+        create_codex_fixture_at(&extra_home, 10, 5)?;
+
+        let mut paths = build_test_paths(&root);
+        paths.extra_codex_homes.push(extra_home.clone());
+
+        let signatures = collect_source_signatures(&paths)?;
+        assert_eq!(signatures.extra_codex_db_signatures.len(), 1);
+        assert_eq!(signatures.extra_codex_db_signatures[0].path, extra_home.display().to_string());
+        assert!(signatures.extra_codex_db_signatures[0].mtime_ms.is_some());
 
         Ok(())
     }

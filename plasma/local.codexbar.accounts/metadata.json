@@ -1,0 +1,24 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Authors": [
+      {
+        "Email": "local@codexbar",
+        "Name": "Codex"
+      }
+    ],
+    "Category": "Utilities",
+    "Description": "Shows live 5h and 1w usage for multiple Codex accounts.",
+    "Description[zh_CN]": "显示多个 Codex 账号的实时 5 小时和 1 周额度。",
+    "EnabledByDefault": false,
+    "FormFactors": [
+      "desktop"
+    ],
+    "Icon": "codex-app",
+    "Id": "local.codexbar.accounts",
+    "License": "MIT",
+    "Name": "CodexBar Accounts",
+    "Name[zh_CN]": "CodexBar Accounts"
+  },
+  "X-Plasma-API-Minimum-Version": "6.0"
+}

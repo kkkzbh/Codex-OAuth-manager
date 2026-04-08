@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>100亿 Tokens</title>
+  <style>
+    :root {
+      --bg: #090402;
+      --bg-soft: #160905;
+      --ink: #fff5eb;
+      --muted: rgba(255, 233, 219, 0.72);
+      --line: rgba(255, 188, 134, 0.18);
+      --panel: rgba(33, 11, 6, 0.66);
+      --panel-strong: rgba(50, 15, 8, 0.88);
+      --orange: #ff7a2f;
+      --gold: #ffd07a;
+      --ember: #ff4d1e;
+      --glow: rgba(255, 111, 46, 0.38);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(circle at 50% 8%, rgba(255, 118, 34, 0.22), transparent 30%),
+        radial-gradient(circle at 50% 40%, rgba(255, 75, 30, 0.10), transparent 38%),
+        linear-gradient(180deg, #1b0804 0%, #0d0503 35%, #070302 100%);
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+      overflow-x: hidden;
+    }
+
+    body {
+      position: relative;
+    }
+
+    .page {
+      position: relative;
+      min-height: 100vh;
+      padding: 28px;
+      isolation: isolate;
+    }
+
+    .noise,
+    .heat,
+    .embers,
+    .flame-field {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .noise {
+      opacity: 0.06;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.6) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.6) 1px, transparent 1px);
+      background-size: 7px 7px;
+      mask-image: radial-gradient(circle at center, black 30%, transparent 82%);
+    }
+
+    .heat {
+      filter: blur(36px);
+      opacity: 0.75;
+      animation: heat-shift 9s ease-in-out infinite alternate;
+      background:
+        radial-gradient(circle at 50% 78%, rgba(255, 118, 48, 0.36), transparent 18%),
+        radial-gradient(circle at 55% 72%, rgba(255, 180, 89, 0.20), transparent 16%),
+        radial-gradient(circle at 44% 68%, rgba(255, 77, 30, 0.24), transparent 18%);
+    }
+
+    .flame-field {
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    .flame-field span {
+      position: absolute;
+      bottom: 18%;
+      width: clamp(110px, 18vw, 280px);
+      aspect-ratio: 0.68;
+      border-radius: 50% 50% 44% 44%;
+      background:
+        radial-gradient(circle at 50% 20%, rgba(255, 233, 170, 0.95) 0 16%, rgba(255, 169, 80, 0.88) 17% 40%, rgba(255, 99, 47, 0.76) 41% 67%, rgba(255, 53, 22, 0.10) 68% 100%);
+      filter: blur(10px);
+      mix-blend-mode: screen;
+      transform-origin: center bottom;
+      opacity: 0.82;
+      clip-path: polygon(50% 0%, 65% 11%, 76% 24%, 89% 46%, 80% 71%, 65% 88%, 50% 100%, 32% 88%, 17% 69%, 11% 44%, 22% 22%, 36% 8%);
+      animation: flame-rise 5.6s ease-in-out infinite;
+    }
+
+    .flame-field span:nth-child(1) {
+      left: 18%;
+      bottom: 15%;
+      animation-delay: -1.8s;
+      opacity: 0.45;
+      transform: scale(0.92);
+    }
+
+    .flame-field span:nth-child(2) {
+      left: 31%;
+      bottom: 12%;
+      animation-delay: -3.2s;
+      width: clamp(140px, 20vw, 320px);
+    }
+
+    .flame-field span:nth-child(3) {
+      left: 44%;
+      bottom: 10%;
+      width: clamp(170px, 24vw, 380px);
+      animation-duration: 6.2s;
+    }
+
+    .flame-field span:nth-child(4) {
+      left: 60%;
+      bottom: 13%;
+      animation-delay: -2.4s;
+      width: clamp(135px, 19vw, 300px);
+    }
+
+    .flame-field span:nth-child(5) {
+      left: 73%;
+      bottom: 16%;
+      animation-delay: -4.4s;
+      opacity: 0.42;
+      transform: scale(0.86);
+    }
+
+    .embers::before,
+    .embers::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-repeat: repeat;
+      background-image:
+        radial-gradient(circle, rgba(255, 214, 161, 0.95) 0 1px, transparent 1.5px),
+        radial-gradient(circle, rgba(255, 136, 64, 0.72) 0 1px, transparent 1.5px);
+      background-size: 140px 140px, 180px 180px;
+      background-position: 20px 100%, 70px 100%;
+      opacity: 0.4;
+      animation: embers-up 14s linear infinite;
+    }
+
+    .embers::after {
+      animation-duration: 18s;
+      opacity: 0.25;
+      filter: blur(1px);
+    }
+
+    .layout {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 56px);
+      justify-content: space-between;
+      gap: 32px;
+    }
+
+    .hero {
+      display: flex;
+      flex: 1;
+      align-items: center;
+      justify-content: center;
+      padding: 8vh 0 0;
+      text-align: center;
+    }
+
+    .hero-copy {
+      width: min(960px, calc(100vw - 56px));
+    }
+
+    h1 {
+      margin: 0;
+      font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+      font-size: clamp(64px, 12vw, 164px);
+      line-height: 0.92;
+      letter-spacing: -0.06em;
+      text-transform: uppercase;
+      text-shadow:
+        0 0 24px rgba(255, 140, 74, 0.28),
+        0 0 70px rgba(255, 93, 35, 0.16);
+      animation: pulse 4.8s ease-in-out infinite;
+    }
+
+    h1 .accent {
+      display: block;
+      background: linear-gradient(180deg, #fff8ec 0%, #ffd59d 35%, #ff8f49 78%, #ff5428 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .stat {
+      position: relative;
+      overflow: hidden;
+      padding: 24px 24px 22px;
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background:
+        linear-gradient(180deg, rgba(61, 17, 9, 0.76) 0%, rgba(20, 8, 5, 0.82) 100%);
+      box-shadow:
+        inset 0 1px 0 rgba(255, 226, 202, 0.06),
+        0 18px 50px rgba(0, 0, 0, 0.28);
+      backdrop-filter: blur(14px);
+      transform: translateY(16px);
+      opacity: 0;
+      animation: card-in 700ms cubic-bezier(.2,.8,.2,1) forwards;
+    }
+
+    .stat:nth-child(2) {
+      animation-delay: 120ms;
+    }
+
+    .stat:nth-child(3) {
+      animation-delay: 240ms;
+    }
+
+    .stat::before {
+      content: "";
+      position: absolute;
+      inset: auto -20% 68% auto;
+      width: 160px;
+      height: 160px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255, 140, 70, 0.24) 0%, transparent 64%);
+      pointer-events: none;
+    }
+
+    .stat-label {
+      color: rgba(255, 226, 207, 0.72);
+      font-size: 13px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .stat-value {
+      margin-top: 14px;
+      font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+      font-size: clamp(28px, 4.2vw, 44px);
+      letter-spacing: -0.04em;
+      line-height: 1;
+    }
+
+    .stat-raw {
+      margin-top: 10px;
+      color: rgba(255, 238, 226, 0.62);
+      font-size: 14px;
+    }
+
+    @keyframes flame-rise {
+      0%,
+      100% {
+        transform: translate3d(0, 0, 0) scale(0.96) rotate(-3deg);
+      }
+      25% {
+        transform: translate3d(8px, -16px, 0) scale(1.04) rotate(2deg);
+      }
+      50% {
+        transform: translate3d(-4px, -28px, 0) scale(1.08) rotate(-1deg);
+      }
+      75% {
+        transform: translate3d(6px, -12px, 0) scale(1.02) rotate(3deg);
+      }
+    }
+
+    @keyframes heat-shift {
+      from {
+        transform: translate3d(0, 0, 0) scale(1);
+      }
+      to {
+        transform: translate3d(0, -18px, 0) scale(1.08);
+      }
+    }
+
+    @keyframes embers-up {
+      from {
+        transform: translateY(10%);
+      }
+      to {
+        transform: translateY(-28%);
+      }
+    }
+
+    @keyframes pulse {
+      0%,
+      100% {
+        transform: scale(1);
+      }
+      50% {
+        transform: scale(1.015);
+      }
+    }
+
+    @keyframes card-in {
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 900px) {
+      .page {
+        padding: 18px;
+      }
+
+      .layout {
+        min-height: calc(100vh - 36px);
+      }
+
+      .hero {
+        padding-top: 8vh;
+        align-items: flex-start;
+      }
+
+      .stats {
+        grid-template-columns: 1fr;
+      }
+
+      .stat {
+        border-radius: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="noise"></div>
+    <div class="heat"></div>
+    <div class="embers"></div>
+    <div class="flame-field" aria-hidden="true">
+      <span></span>
+      <span></span>
+      <span></span>
+      <span></span>
+      <span></span>
+    </div>
+
+    <div class="layout">
+      <section class="hero">
+        <div class="hero-copy">
+          <h1><span class="accent">100亿</span>Tokens!</h1>
+        </div>
+      </section>
+
+      <section class="stats" aria-label="Peak token windows">
+        <article class="stat">
+          <div class="stat-label">最高日消耗 Token</div>
+          <div class="stat-value">9.00 亿</div>
+          <div class="stat-raw">900,337,454 tokens</div>
+        </article>
+
+        <article class="stat">
+          <div class="stat-label">最高周消耗 Token</div>
+          <div class="stat-value">24.63 亿</div>
+          <div class="stat-raw">2,462,768,414 tokens</div>
+        </article>
+
+        <article class="stat">
+          <div class="stat-label">最高月消耗 Token</div>
+          <div class="stat-value">77.85 亿</div>
+          <div class="stat-raw">7,785,139,254 tokens</div>
+        </article>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
