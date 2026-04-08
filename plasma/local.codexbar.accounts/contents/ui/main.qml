@@ -23,7 +23,6 @@ PlasmoidItem {
     readonly property int dangerPercent: Plasmoid.configuration.dangerPercent || 90
     readonly property int liveFetchConcurrency: Math.max(1, Plasmoid.configuration.liveFetchConcurrency || 4)
     readonly property int liveFetchTimeoutSeconds: Math.max(3, Plasmoid.configuration.liveFetchTimeoutSeconds || 8)
-    readonly property bool liveFetchOnExpand: Plasmoid.configuration.liveFetchOnExpand !== false
     readonly property bool autoSwitchEnabled: Plasmoid.configuration.enableAutoSwitch || false
     readonly property int autoSwitch5hThreshold: Plasmoid.configuration.autoSwitch5hThreshold || 10
     readonly property int autoSwitchWeeklyThreshold: Plasmoid.configuration.autoSwitchWeeklyThreshold || 5
@@ -288,12 +287,6 @@ PlasmoidItem {
         repeat: true
         running: true
         onTriggered: root.refreshCurrent(true)
-    }
-
-    onExpandedChanged: function() {
-        if (root.expanded && liveFetchOnExpand) {
-            refreshAll(true);
-        }
     }
 
     Component.onCompleted: refreshCurrent(true)

@@ -27,9 +27,6 @@
     <entry name="terminalCommand" type="String">
       <default>konsole -e {command}</default>
     </entry>
-    <entry name="liveFetchOnExpand" type="Bool">
-      <default>true</default>
-    </entry>
     <entry name="liveFetchConcurrency" type="Int">
       <default>4</default>
     </entry>

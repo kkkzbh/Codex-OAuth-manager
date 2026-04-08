@@ -14,7 +14,6 @@ Kirigami.FormLayout {
     property int cfg_warnPercent: Plasmoid.configuration.warnPercent
     property int cfg_dangerPercent: Plasmoid.configuration.dangerPercent
     property string cfg_terminalCommand: Plasmoid.configuration.terminalCommand
-    property bool cfg_liveFetchOnExpand: Plasmoid.configuration.liveFetchOnExpand
     property int cfg_liveFetchConcurrency: Plasmoid.configuration.liveFetchConcurrency
     property int cfg_liveFetchTimeoutSeconds: Plasmoid.configuration.liveFetchTimeoutSeconds
     property bool cfg_enableAutoSwitch: Plasmoid.configuration.enableAutoSwitch
@@ -72,12 +71,6 @@ Kirigami.FormLayout {
         Kirigami.FormData.label: i18n("Terminal command:")
         text: page.cfg_terminalCommand
         onTextChanged: page.cfg_terminalCommand = text
-    }
-
-    QQC2.CheckBox {
-        Kirigami.FormData.label: i18n("Live refresh on expand:")
-        checked: page.cfg_liveFetchOnExpand
-        onToggled: page.cfg_liveFetchOnExpand = checked
     }
 
     QQC2.SpinBox {
