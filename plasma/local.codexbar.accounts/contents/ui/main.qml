@@ -38,6 +38,7 @@ PlasmoidItem {
     property bool actionInFlight: false
     property string errorMessage: ""
     property string pendingAction: ""
+    property int commandInvocationSerial: 0
     property double lastAutoSwitchAtMs: 0
     property var snapshot: ({
         generatedAt: "",
@@ -109,8 +110,14 @@ PlasmoidItem {
     function runCommand(actionName, commandName, extraArgs, expectSnapshot) {
         pendingAction = actionName;
         actionInFlight = !expectSnapshot;
+        commandInvocationSerial += 1;
+        const invocationNonce = String(Date.now()) + "-" + String(commandInvocationSerial);
+        const invocationCommand = "env CODEXBAR_REQUEST_NONCE="
+            + shellQuote(invocationNonce)
+            + " "
+            + buildBridgeCommand(commandName, extraArgs);
         executable.connectedSources = [];
-        executable.connectedSources = ["sh -lc " + shellQuote(buildBridgeCommand(commandName, extraArgs))];
+        executable.connectedSources = ["sh -lc " + shellQuote(invocationCommand)];
     }
 
     function refreshCurrent(forceRefresh) {
