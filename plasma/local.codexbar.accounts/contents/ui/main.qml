@@ -26,7 +26,11 @@ PlasmoidItem {
     readonly property bool autoSwitchEnabled: Plasmoid.configuration.enableAutoSwitch || false
     readonly property int autoSwitch5hThreshold: Plasmoid.configuration.autoSwitch5hThreshold || 10
     readonly property int autoSwitchWeeklyThreshold: Plasmoid.configuration.autoSwitchWeeklyThreshold || 5
-    readonly property string terminalCommand: Plasmoid.configuration.terminalCommand || "konsole -e {command}"
+    readonly property string terminalCommand: Plasmoid.configuration.terminalCommand || "kitty -e {command}"
+    readonly property string loginCommand: Plasmoid.configuration.loginCommand || "codex login"
+    readonly property var snapshot: allSnapshot && allSnapshot.accounts && allSnapshot.accounts.length > 0
+        ? allSnapshot
+        : activeSnapshot
     readonly property var currentAccount: currentAccountFromSnapshot()
     readonly property int currentAccountSessionPercent: currentAccount && currentAccount.session ? currentAccount.session.usedPercent : 0
     readonly property int currentAccountWeeklyPercent: currentAccount && currentAccount.weekly ? currentAccount.weekly.usedPercent : 0
@@ -39,7 +43,17 @@ PlasmoidItem {
     property string pendingAction: ""
     property int commandInvocationSerial: 0
     property double lastAutoSwitchAtMs: 0
-    property var snapshot: ({
+    property var activeSnapshot: ({
+        generatedAt: "",
+        status: "error",
+        error: null,
+        activeAccountKey: "",
+        accountCount: 0,
+        healthyAccountCount: 0,
+        staleAccountCount: 0,
+        accounts: []
+    })
+    property var allSnapshot: ({
         generatedAt: "",
         status: "error",
         error: null,
@@ -102,6 +116,7 @@ PlasmoidItem {
             + " FETCH_CONCURRENCY=" + shellQuote(String(liveFetchConcurrency))
             + " FETCH_TIMEOUT_SECONDS=" + shellQuote(String(liveFetchTimeoutSeconds))
             + " TERMINAL_COMMAND=" + shellQuote(terminalCommand)
+            + " LOGIN_COMMAND=" + shellQuote(loginCommand)
             + " AUTO_SWITCH_5H_THRESHOLD=" + shellQuote(String(autoSwitch5hThreshold))
             + " AUTO_SWITCH_WEEKLY_THRESHOLD=" + shellQuote(String(autoSwitchWeeklyThreshold))
             + " " + shellQuote(bridgePathExpanded)
@@ -169,11 +184,15 @@ PlasmoidItem {
         runCommand("auto-switch", "auto-switch", ["--force-refresh"], false);
     }
 
-    function parseSnapshot(stdout) {
+    function parseSnapshot(stdout, activeOnly) {
         try {
             const parsed = JSON.parse(stdout);
             if (!parsed.accounts) parsed.accounts = [];
-            snapshot = parsed;
+            if (activeOnly) {
+                activeSnapshot = parsed;
+            } else {
+                allSnapshot = parsed;
+            }
             errorMessage = parsed.error ? String(parsed.error) : "";
             isLoading = false;
         } catch (error) {
@@ -194,7 +213,8 @@ PlasmoidItem {
     }
 
     function currentAccountFromSnapshot() {
-        return currentAccountFromData(snapshot);
+        const activeAccount = currentAccountFromData(activeSnapshot);
+        return activeAccount ? activeAccount : currentAccountFromData(snapshot);
     }
 
     function displayName(account) {
@@ -268,7 +288,7 @@ PlasmoidItem {
             }
 
             if (action === "snapshot-active" || action === "snapshot-all") {
-                root.parseSnapshot(stdout);
+                root.parseSnapshot(stdout, action === "snapshot-active");
                 root.actionInFlight = false;
                 if (root.autoSwitchEnabled && action === "snapshot-active") {
                     root.maybeAutoSwitch();
@@ -286,10 +306,15 @@ PlasmoidItem {
         interval: root.refreshIntervalSeconds * 1000
         repeat: true
         running: true
-        onTriggered: root.refreshCurrent(true)
+        onTriggered: root.expanded ? root.refreshAll(true) : root.refreshCurrent(true)
     }
 
     Component.onCompleted: refreshCurrent(true)
+    onExpandedChanged: {
+        if (expanded) {
+            refreshAll(true);
+        }
+    }
 
     PlasmaCore.Action {
         id: refreshAction

@@ -542,8 +542,11 @@ pub fn remove_account(paths: &AccountsPaths, account_key: &str) -> Result<Accoun
     })
 }
 
-pub fn spawn_account_login(terminal_command: Option<&str>) -> Result<AccountActionResult> {
-    let login_command = "codex login --device-auth";
+pub fn spawn_account_login(terminal_command: Option<&str>, login_command: Option<&str>) -> Result<AccountActionResult> {
+    let login_command = login_command
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("codex login");
     let shell_command = if let Some(template) = terminal_command.filter(|value| !value.trim().is_empty()) {
         if template.contains("{command}") {
             template.replace("{command}", login_command)
@@ -553,7 +556,7 @@ pub fn spawn_account_login(terminal_command: Option<&str>) -> Result<AccountActi
     } else if let Ok(terminal) = std::env::var("TERMINAL") {
         format!("{terminal} -e {login_command}")
     } else {
-        format!("konsole -e {login_command}")
+        format!("kitty -e {login_command}")
     };
 
     Command::new("sh")
@@ -569,7 +572,7 @@ pub fn spawn_account_login(terminal_command: Option<&str>) -> Result<AccountActi
         ok: true,
         action: "login".to_string(),
         account_key: None,
-        message: "Started Codex device auth login".to_string(),
+        message: format!("Started Codex login using `{login_command}`"),
     })
 }
 
@@ -769,20 +772,35 @@ fn sync_current_auth_into_registry(paths: &AccountsPaths, registry: &mut Registr
         account.account_key == account_key
             || account.chatgpt_account_id.as_deref() == Some(account_id.as_str())
     }) {
-        existing.account_key = account_key.clone();
-        existing.chatgpt_account_id = Some(account_id.clone());
-        existing.chatgpt_user_id = Some(user_id.clone());
+        if existing.account_key != account_key {
+            existing.account_key = account_key.clone();
+            changed = true;
+        }
+        if existing.chatgpt_account_id.as_deref() != Some(account_id.as_str()) {
+            existing.chatgpt_account_id = Some(account_id.clone());
+            changed = true;
+        }
+        if existing.chatgpt_user_id.as_deref() != Some(user_id.as_str()) {
+            existing.chatgpt_user_id = Some(user_id.clone());
+            changed = true;
+        }
         if !email.is_empty() {
-            existing.email = email.clone();
+            if existing.email != email {
+                existing.email = email.clone();
+                changed = true;
+            }
         }
         if existing.alias.is_empty() && !alias.is_empty() {
             existing.alias = alias.clone();
+            changed = true;
         }
         if existing.plan.is_empty() && !plan.is_empty() {
             existing.plan = plan.clone();
+            changed = true;
         }
         if existing.auth_mode.is_empty() && !auth_file.auth_mode.is_empty() {
             existing.auth_mode = auth_file.auth_mode.clone();
+            changed = true;
         }
     } else {
         registry.accounts.push(RegistryAccount {
@@ -1356,6 +1374,42 @@ mod tests {
 
         let auth: AuthFile = serde_json::from_str(&fs::read_to_string(&paths.auth_path)?)?;
         assert_eq!(auth.tokens.account_id.as_deref(), Some("acct-2"));
+        Ok(())
+    }
+
+    #[test]
+    fn sync_current_auth_updates_existing_registry_entry() -> Result<()> {
+        let root = TempDir::new()?;
+        create_fixture(&root)?;
+        let paths = test_paths(&root);
+
+        write_json(
+            &paths.auth_path,
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "current",
+                    "refresh_token": "refresh-current",
+                    "account_id": "acct-2",
+                    "id_token": "eyJhbGciOiJub25lIn0.eyJlbWFpbCI6ImJldGFAZXhhbXBsZS5jb20iLCJuYW1lIjoiQmV0YSIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJhY2N0LTIiLCJjaGF0Z3B0X3BsYW5fdHlwZSI6InBybyIsImNoYXRncHRfdXNlcl9pZCI6InVzZXItYiJ9fQ."
+                }
+            }),
+        )?;
+
+        let mut registry = read_registry(&paths.registry_path)?;
+        registry.accounts[1].email = String::new();
+        registry.accounts[1].alias = String::new();
+        registry.accounts[1].plan = String::new();
+        write_registry(&paths.registry_path, &registry)?;
+
+        let mut registry = read_registry(&paths.registry_path)?;
+        sync_current_auth_into_registry(&paths, &mut registry)?;
+
+        let updated = read_registry(&paths.registry_path)?;
+        assert_eq!(updated.active_account_key.as_deref(), Some("user-b::acct-2"));
+        assert_eq!(updated.accounts[1].email, "beta@example.com");
+        assert_eq!(updated.accounts[1].alias, "Beta");
+        assert_eq!(updated.accounts[1].plan, "pro");
         Ok(())
     }
 

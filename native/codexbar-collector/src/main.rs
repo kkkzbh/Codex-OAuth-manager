@@ -99,6 +99,8 @@ struct AccountRemoveArgs {
 struct AccountLoginArgs {
     #[arg(long)]
     terminal: Option<String>,
+    #[arg(long)]
+    command: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -203,7 +205,7 @@ fn run() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
             AccountCommand::Login(args) => {
-                let result = spawn_account_login(args.terminal.as_deref())?;
+                let result = spawn_account_login(args.terminal.as_deref(), args.command.as_deref())?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
             AccountCommand::AutoSwitch(args) => {

@@ -25,7 +25,10 @@
       <default>90</default>
     </entry>
     <entry name="terminalCommand" type="String">
-      <default>konsole -e {command}</default>
+      <default>kitty -e {command}</default>
+    </entry>
+    <entry name="loginCommand" type="String">
+      <default>codex login</default>
     </entry>
     <entry name="liveFetchConcurrency" type="Int">
       <default>4</default>

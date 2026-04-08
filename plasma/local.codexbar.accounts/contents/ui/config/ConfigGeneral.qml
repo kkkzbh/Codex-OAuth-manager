@@ -14,6 +14,7 @@ Kirigami.FormLayout {
     property int cfg_warnPercent: Plasmoid.configuration.warnPercent
     property int cfg_dangerPercent: Plasmoid.configuration.dangerPercent
     property string cfg_terminalCommand: Plasmoid.configuration.terminalCommand
+    property string cfg_loginCommand: Plasmoid.configuration.loginCommand
     property int cfg_liveFetchConcurrency: Plasmoid.configuration.liveFetchConcurrency
     property int cfg_liveFetchTimeoutSeconds: Plasmoid.configuration.liveFetchTimeoutSeconds
     property bool cfg_enableAutoSwitch: Plasmoid.configuration.enableAutoSwitch
@@ -71,6 +72,12 @@ Kirigami.FormLayout {
         Kirigami.FormData.label: i18n("Terminal command:")
         text: page.cfg_terminalCommand
         onTextChanged: page.cfg_terminalCommand = text
+    }
+
+    QQC2.TextField {
+        Kirigami.FormData.label: i18n("Login command:")
+        text: page.cfg_loginCommand
+        onTextChanged: page.cfg_loginCommand = text
     }
 
     QQC2.SpinBox {

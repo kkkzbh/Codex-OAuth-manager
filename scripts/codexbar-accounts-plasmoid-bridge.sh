@@ -11,6 +11,7 @@ FETCH_TIMEOUT_SECONDS="${FETCH_TIMEOUT_SECONDS:-8}"
 FETCH_CONCURRENCY="${FETCH_CONCURRENCY:-4}"
 CODEX_HOME_PATH="${CODEX_HOME_PATH:-${CODEX_HOME:-$HOME/.codex}}"
 TERMINAL_COMMAND="${TERMINAL_COMMAND:-}"
+LOGIN_COMMAND="${LOGIN_COMMAND:-codex login}"
 AUTO_SWITCH_5H_THRESHOLD="${AUTO_SWITCH_5H_THRESHOLD:-10}"
 AUTO_SWITCH_WEEKLY_THRESHOLD="${AUTO_SWITCH_WEEKLY_THRESHOLD:-5}"
 
@@ -43,9 +44,9 @@ case "$cmd" in
     ;;
   login)
     if [[ -n "$TERMINAL_COMMAND" ]]; then
-      exec "$COLLECTOR_PATH" account login --terminal "$TERMINAL_COMMAND" "$@"
+      exec "$COLLECTOR_PATH" account login --terminal "$TERMINAL_COMMAND" --command "$LOGIN_COMMAND" "$@"
     fi
-    exec "$COLLECTOR_PATH" account login "$@"
+    exec "$COLLECTOR_PATH" account login --command "$LOGIN_COMMAND" "$@"
     ;;
   auto-switch)
     exec "$COLLECTOR_PATH" account auto-switch --codex-home "$CODEX_HOME_PATH" \
