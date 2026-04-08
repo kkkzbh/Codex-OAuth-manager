@@ -263,7 +263,7 @@ PlasmoidItem {
         interval: root.refreshIntervalSeconds * 1000
         repeat: true
         running: true
-        onTriggered: root.refreshCurrent(false)
+        onTriggered: root.refreshCurrent(true)
     }
 
     onExpandedChanged: function() {
