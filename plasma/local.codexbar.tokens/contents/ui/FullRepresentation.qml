@@ -5,6 +5,7 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 
 import org.kde.kirigami as Kirigami
+import org.kde.plasma.components as PlasmaComponents3
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.plasma.plasmoid
 
@@ -13,330 +14,275 @@ PlasmaExtras.Representation {
 
     required property PlasmoidItem rootItem
 
-    readonly property color panelColor: Qt.rgba(0.985, 0.985, 0.992, 0.97)
-    readonly property color panelBorderColor: Qt.rgba(0.16, 0.18, 0.24, 0.10)
-    readonly property color primaryTextColor: Qt.rgba(0.10, 0.12, 0.18, 0.96)
-    readonly property color secondaryTextColor: Qt.rgba(0.10, 0.12, 0.18, 0.58)
-    readonly property color separatorColor: Qt.rgba(0.10, 0.12, 0.18, 0.08)
-    readonly property color accentColor: Qt.rgba(0.19, 0.38, 0.92, 1.0)
-    readonly property color accentWashColor: Qt.rgba(0.19, 0.38, 0.92, 0.10)
-    readonly property color warmWashColor: Qt.rgba(1.0, 0.48, 0.33, 0.12)
     readonly property bool hasError: fullRoot.rootItem.errorMessage.length > 0
+    readonly property var sourcesModel: fullRoot.rootItem.snapshot.sources || []
+    readonly property string sourceSummary: fullRoot.rootItem.snapshot.unavailableSourceCount > 0
+        ? i18n("%1 source unavailable", fullRoot.rootItem.snapshot.unavailableSourceCount)
+        : i18n("All sources available")
 
     collapseMarginsHint: true
 
-    implicitWidth: Layout.preferredWidth
-    implicitHeight: contentBody.implicitHeight
-    Layout.minimumWidth: Kirigami.Units.gridUnit * 22
-    Layout.preferredWidth: Kirigami.Units.gridUnit * 26
-    Layout.maximumWidth: Kirigami.Units.gridUnit * 30
-    Layout.minimumHeight: contentBody.implicitHeight + (Kirigami.Units.largeSpacing * 2.3)
-    Layout.preferredHeight: Layout.minimumHeight
-    Layout.maximumHeight: Layout.minimumHeight
-    Layout.fillHeight: false
+    Layout.minimumWidth: Kirigami.Units.gridUnit * 24
+    Layout.preferredWidth: Kirigami.Units.gridUnit * 30
+    Layout.maximumWidth: Kirigami.Units.gridUnit * 34
+    Layout.minimumHeight: Kirigami.Units.gridUnit * 18
 
-    background: Rectangle {
-        radius: Kirigami.Units.largeSpacing * 1.7
-        color: fullRoot.panelColor
-        border.width: 1
-        border.color: fullRoot.panelBorderColor
-    }
+    contentItem: ColumnLayout {
+        spacing: Kirigami.Units.largeSpacing
+        anchors.leftMargin: Kirigami.Units.largeSpacing * 1.2
+        anchors.rightMargin: Kirigami.Units.largeSpacing * 1.2
+        anchors.topMargin: Kirigami.Units.largeSpacing
+        anchors.bottomMargin: Kirigami.Units.largeSpacing
 
-    contentItem: Item {
-        id: contentBody
-        implicitHeight: contentColumn.implicitHeight + (Kirigami.Units.largeSpacing * 2.3)
-
-        Column {
-            id: contentColumn
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: Kirigami.Units.largeSpacing * 1.15
+        RowLayout {
+            Layout.fillWidth: true
             spacing: Kirigami.Units.largeSpacing
 
-            Item {
-                width: parent.width
-                implicitHeight: headerLayout.implicitHeight
+            Image {
+                Layout.preferredWidth: Kirigami.Units.iconSizes.medium
+                Layout.preferredHeight: Kirigami.Units.iconSizes.medium
+                source: "assets/flame.svg"
+                sourceSize.width: width
+                sourceSize.height: height
+                fillMode: Image.PreserveAspectFit
+                smooth: true
+            }
 
-                RowLayout {
-                    id: headerLayout
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    spacing: Kirigami.Units.largeSpacing
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Kirigami.Units.smallSpacing / 2
 
-                    Rectangle {
-                        Layout.preferredWidth: Kirigami.Units.gridUnit * 2.15
-                        Layout.preferredHeight: Layout.preferredWidth
-                        radius: Kirigami.Units.largeSpacing
-                        color: fullRoot.warmWashColor
+                PlasmaExtras.Heading {
+                    level: 2
+                    text: i18n("Codex total tokens")
+                    Layout.fillWidth: true
+                }
 
-                        Image {
-                            anchors.centerIn: parent
-                            source: "assets/flame.svg"
-                            width: Kirigami.Units.iconSizes.medium
-                            height: Kirigami.Units.iconSizes.medium
-                            sourceSize.width: width
-                            sourceSize.height: height
-                            fillMode: Image.PreserveAspectFit
-                            smooth: true
-                        }
-                    }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: Kirigami.Units.smallSpacing / 2
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: i18n("Total Tokens")
-                            color: fullRoot.secondaryTextColor
-                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            font.weight: Font.Medium
-                            elide: Text.ElideRight
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: fullRoot.rootItem.isLoading
-                                ? "--"
-                                : String(fullRoot.rootItem.snapshot.formattedTotalTokens || "--")
-                            color: fullRoot.primaryTextColor
-                            font.pixelSize: Math.max(26, Kirigami.Theme.defaultFont.pixelSize * 2.15)
-                            minimumPixelSize: Math.max(20, Kirigami.Theme.defaultFont.pixelSize * 1.5)
-                            font.weight: Font.Black
-                            fontSizeMode: Text.Fit
-                            elide: Text.ElideRight
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: fullRoot.hasError
-                                ? fullRoot.rootItem.errorMessage
-                                : fullRoot.rootItem.relativeTimestamp(fullRoot.rootItem.snapshot.generatedAt)
-                            color: fullRoot.hasError
-                                ? Qt.rgba(0.74, 0.22, 0.18, 0.92)
-                                : fullRoot.secondaryTextColor
-                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            elide: Text.ElideRight
-                        }
-                    }
-
-                    Rectangle {
-                        Layout.alignment: Qt.AlignTop
-                        Layout.topMargin: Kirigami.Units.smallSpacing / 2
-                        visible: !fullRoot.rootItem.isLoading
-                        radius: height / 2
-                        color: fullRoot.accentWashColor
-                        implicitWidth: statusLabel.implicitWidth + Kirigami.Units.largeSpacing
-                        implicitHeight: statusLabel.implicitHeight + Kirigami.Units.smallSpacing
-
-                        Text {
-                            id: statusLabel
-                            anchors.centerIn: parent
-                            text: fullRoot.rootItem.snapshot.unavailableSourceCount > 0
-                                ? i18n("%1 unavailable", fullRoot.rootItem.snapshot.unavailableSourceCount)
-                                : i18n("%1 online", fullRoot.rootItem.snapshot.availableSourceCount)
-                            color: fullRoot.accentColor
-                            font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                            font.weight: Font.DemiBold
-                        }
-                    }
+                PlasmaComponents3.Label {
+                    Layout.fillWidth: true
+                    text: fullRoot.hasError
+                        ? fullRoot.rootItem.errorMessage
+                        : i18n("%1 · %2",
+                               fullRoot.rootItem.snapshot.unavailableSourceCount > 0
+                                   ? i18n("%1 unavailable", fullRoot.rootItem.snapshot.unavailableSourceCount)
+                                   : i18n("%1 online", fullRoot.rootItem.snapshot.availableSourceCount),
+                               fullRoot.rootItem.relativeTimestamp(fullRoot.rootItem.snapshot.generatedAt))
+                    opacity: fullRoot.hasError ? 0.95 : 0.65
+                    color: fullRoot.hasError
+                        ? Qt.rgba(0.85, 0.30, 0.24, 1.0)
+                        : Kirigami.Theme.textColor
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                    elide: Text.ElideRight
                 }
             }
 
-            Rectangle {
-                width: parent.width
-                height: 1
-                color: fullRoot.separatorColor
+            PlasmaComponents3.Label {
+                text: fullRoot.rootItem.isLoading
+                    ? "--"
+                    : String(fullRoot.rootItem.snapshot.formattedTotalTokens || "--")
+                opacity: 0.8
+                font.weight: Font.DemiBold
+            }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(Kirigami.Theme.textColor.r,
+                           Kirigami.Theme.textColor.g,
+                           Kirigami.Theme.textColor.b, 0.10)
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.smallSpacing
+
+            PlasmaExtras.Heading {
+                level: 3
+                text: i18n("Totals")
             }
 
-            Item {
-                width: parent.width
-                implicitHeight: statsLayout.implicitHeight
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: Kirigami.Units.largeSpacing
+                rowSpacing: Kirigami.Units.smallSpacing
 
-                GridLayout {
-                    id: statsLayout
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    columns: 2
-                    columnSpacing: Kirigami.Units.largeSpacing
-                    rowSpacing: Kirigami.Units.smallSpacing
+                PlasmaComponents3.Label {
+                    text: i18n("All time")
+                    opacity: 0.65
+                }
 
-                    Text {
-                        text: i18n("Today")
-                        color: fullRoot.secondaryTextColor
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    }
+                PlasmaComponents3.Label {
+                    Layout.fillWidth: true
+                    text: fullRoot.rootItem.isLoading
+                        ? "--"
+                        : String(fullRoot.rootItem.snapshot.formattedTotalTokens || "--")
+                    font.weight: Font.DemiBold
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideLeft
+                }
 
-                    Text {
-                        Layout.fillWidth: true
-                        text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokensToday)
-                        color: fullRoot.primaryTextColor
-                        font.pixelSize: Kirigami.Theme.defaultFont.pixelSize + 3
-                        font.weight: Font.DemiBold
-                        horizontalAlignment: Text.AlignRight
-                        elide: Text.ElideLeft
-                    }
+                PlasmaComponents3.Label {
+                    text: i18n("Today")
+                    opacity: 0.65
+                }
 
-                    Text {
-                        text: i18n("7 days")
-                        color: fullRoot.secondaryTextColor
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    }
+                PlasmaComponents3.Label {
+                    Layout.fillWidth: true
+                    text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokensToday)
+                    font.weight: Font.DemiBold
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideLeft
+                }
 
-                    Text {
-                        Layout.fillWidth: true
-                        text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokens7d)
-                        color: fullRoot.primaryTextColor
-                        font.pixelSize: Kirigami.Theme.defaultFont.pixelSize + 3
-                        font.weight: Font.DemiBold
-                        horizontalAlignment: Text.AlignRight
-                        elide: Text.ElideLeft
-                    }
+                PlasmaComponents3.Label {
+                    text: i18n("7 days")
+                    opacity: 0.65
+                }
 
-                    Text {
-                        text: i18n("30 days")
-                        color: fullRoot.secondaryTextColor
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                    }
+                PlasmaComponents3.Label {
+                    Layout.fillWidth: true
+                    text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokens7d)
+                    font.weight: Font.DemiBold
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideLeft
+                }
 
-                    Text {
-                        Layout.fillWidth: true
-                        text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokens30d)
-                        color: fullRoot.primaryTextColor
-                        font.pixelSize: Kirigami.Theme.defaultFont.pixelSize + 3
-                        font.weight: Font.DemiBold
-                        horizontalAlignment: Text.AlignRight
-                        elide: Text.ElideLeft
-                    }
+                PlasmaComponents3.Label {
+                    text: i18n("30 days")
+                    opacity: 0.65
+                }
+
+                PlasmaComponents3.Label {
+                    Layout.fillWidth: true
+                    text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokens30d)
+                    font.weight: Font.DemiBold
+                    horizontalAlignment: Text.AlignRight
+                    elide: Text.ElideLeft
                 }
             }
+        }
 
-            Rectangle {
-                width: parent.width
-                height: 1
-                color: fullRoot.separatorColor
-            }
+        Rectangle {
+            Layout.fillWidth: true
+            height: 1
+            color: Qt.rgba(Kirigami.Theme.textColor.r,
+                           Kirigami.Theme.textColor.g,
+                           Kirigami.Theme.textColor.b, 0.10)
+        }
 
-            Item {
-                width: parent.width
-                implicitHeight: sourcesLayout.implicitHeight
+        PlasmaExtras.Heading {
+            level: 3
+            text: i18n("Sources")
+        }
 
-                ColumnLayout {
-                    id: sourcesLayout
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    spacing: Kirigami.Units.largeSpacing * 0.75
+        QQC2.ScrollView {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
 
-                    Text {
-                        Layout.fillWidth: true
-                        text: i18n("Sources")
-                        color: fullRoot.secondaryTextColor
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        font.weight: Font.Medium
-                    }
+            ListView {
+                model: fullRoot.sourcesModel
+                spacing: Kirigami.Units.largeSpacing * 0.6
+                clip: true
 
-                    Repeater {
-                        model: fullRoot.rootItem.snapshot.sources || []
+                delegate: Rectangle {
+                    required property var modelData
 
-                        delegate: RowLayout {
-                            required property var modelData
+                    width: ListView.view.width
+                    radius: Kirigami.Units.smallSpacing
+                    color: modelData.available ? "transparent" : Qt.rgba(0.85, 0.30, 0.24, 0.06)
+                    border.width: modelData.available ? 0 : 1
+                    border.color: Qt.rgba(0.85, 0.30, 0.24, 0.18)
+                    implicitHeight: delegateLayout.implicitHeight + Kirigami.Units.smallSpacing * 2
+
+                    RowLayout {
+                        id: delegateLayout
+                        anchors.fill: parent
+                        anchors.margins: Kirigami.Units.smallSpacing
+                        spacing: Kirigami.Units.largeSpacing * 0.75
+
+                        Rectangle {
+                            Layout.alignment: Qt.AlignVCenter
+                            width: Kirigami.Units.smallSpacing + 2
+                            height: width
+                            radius: width / 2
+                            color: modelData.available
+                                ? Qt.rgba(0.17, 0.67, 0.49, 0.96)
+                                : Qt.rgba(0.58, 0.60, 0.66, 0.94)
+                        }
+
+                        ColumnLayout {
                             Layout.fillWidth: true
-                            spacing: Kirigami.Units.largeSpacing * 0.8
+                            spacing: Kirigami.Units.smallSpacing / 2
 
-                            Rectangle {
-                                Layout.alignment: Qt.AlignTop
-                                Layout.topMargin: Kirigami.Units.smallSpacing
-                                width: 7
-                                height: 7
-                                radius: 3.5
-                                color: modelData.available
-                                    ? Qt.rgba(0.17, 0.67, 0.49, 0.96)
-                                    : Qt.rgba(0.58, 0.60, 0.66, 0.94)
-                            }
-
-                            ColumnLayout {
+                            PlasmaComponents3.Label {
                                 Layout.fillWidth: true
-                                spacing: 2
-
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: modelData.label
-                                    color: fullRoot.primaryTextColor
-                                    font.pixelSize: Kirigami.Theme.defaultFont.pixelSize + 1
-                                    font.weight: Font.DemiBold
-                                    elide: Text.ElideRight
-                                }
-
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: modelData.available && modelData.latestDataAt
-                                        ? fullRoot.rootItem.relativeTimestamp(modelData.latestDataAt)
-                                        : fullRoot.rootItem.sourceStatusText(modelData)
-                                    color: fullRoot.secondaryTextColor
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                                    elide: Text.ElideRight
-                                }
-                            }
-
-                            Text {
-                                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                text: modelData.formattedTotalTokens
-                                color: fullRoot.primaryTextColor
-                                font.pixelSize: Kirigami.Theme.defaultFont.pixelSize + 1
+                                text: modelData.label
                                 font.weight: Font.DemiBold
-                                horizontalAlignment: Text.AlignRight
-                                elide: Text.ElideLeft
+                                elide: Text.ElideRight
                             }
+
+                            PlasmaComponents3.Label {
+                                Layout.fillWidth: true
+                                text: modelData.available && modelData.latestDataAt
+                                    ? fullRoot.rootItem.relativeTimestamp(modelData.latestDataAt)
+                                    : fullRoot.rootItem.sourceStatusText(modelData)
+                                opacity: 0.65
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        PlasmaComponents3.Label {
+                            text: modelData.formattedTotalTokens
+                            font.weight: Font.DemiBold
+                            horizontalAlignment: Text.AlignRight
+                            Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+                            elide: Text.ElideLeft
                         }
                     }
                 }
             }
+        }
 
-            Rectangle {
-                width: parent.width
-                height: 1
-                color: fullRoot.separatorColor
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: Kirigami.Units.largeSpacing
+
+            PlasmaComponents3.Label {
+                Layout.fillWidth: true
+                text: fullRoot.rootItem.isLoading
+                    ? i18n("Refreshing token totals…")
+                    : fullRoot.sourceSummary
+                opacity: 0.6
+                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                elide: Text.ElideRight
             }
 
-            Item {
-                width: parent.width
-                implicitHeight: footerLayout.implicitHeight
+            QQC2.Button {
+                enabled: !fullRoot.rootItem.isLoading
+                text: fullRoot.rootItem.isLoading ? i18n("Refreshing…") : i18n("Refresh")
+                icon.name: "view-refresh"
+                display: QQC2.AbstractButton.TextBesideIcon
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.text: i18n("Refresh")
+                onClicked: fullRoot.rootItem.refresh()
+            }
 
-                RowLayout {
-                    id: footerLayout
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    spacing: Kirigami.Units.smallSpacing
+            QQC2.BusyIndicator {
+                visible: fullRoot.rootItem.isLoading
+                running: visible
+                implicitWidth: Kirigami.Units.iconSizes.small
+                implicitHeight: Kirigami.Units.iconSizes.small
+            }
 
-                    Text {
-                        Layout.fillWidth: true
-                        text: fullRoot.rootItem.snapshot.unavailableSourceCount > 0
-                            ? i18n("%1 source unavailable", fullRoot.rootItem.snapshot.unavailableSourceCount)
-                            : i18n("All sources available")
-                        color: fullRoot.secondaryTextColor
-                        font.pixelSize: Kirigami.Theme.smallFont.pixelSize
-                        elide: Text.ElideRight
-                    }
-
-                    QQC2.ToolButton {
-                        icon.name: "view-refresh"
-                        text: i18n("Refresh")
-                        display: QQC2.AbstractButton.IconOnly
-                        onClicked: fullRoot.rootItem.refresh()
-                    }
-
-                    QQC2.ToolButton {
-                        icon.name: "settings-configure"
-                        text: i18n("Settings")
-                        display: QQC2.AbstractButton.IconOnly
-                        onClicked: Plasmoid.internalAction("configure").trigger()
-                    }
-                }
+            QQC2.ToolButton {
+                icon.name: "configure"
+                display: QQC2.AbstractButton.IconOnly
+                QQC2.ToolTip.visible: hovered
+                QQC2.ToolTip.text: i18n("Configure")
+                onClicked: Plasmoid.internalAction("configure").trigger()
             }
         }
     }

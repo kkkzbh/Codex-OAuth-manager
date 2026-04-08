@@ -28,12 +28,9 @@ Item {
         anchors.fill: parent
         radius: height / 2
         color: mouseArea.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
-        border.width: 0
 
         Behavior on color {
-            ColorAnimation {
-                duration: 140
-            }
+            ColorAnimation { duration: 140 }
         }
     }
 
