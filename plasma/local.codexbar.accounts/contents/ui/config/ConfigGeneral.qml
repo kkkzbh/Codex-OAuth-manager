@@ -42,7 +42,7 @@ Kirigami.FormLayout {
 
     QQC2.SpinBox {
         Kirigami.FormData.label: i18n("Refresh interval:")
-        from: 30
+        from: 10
         to: 600
         value: page.cfg_refreshIntervalSeconds
         editable: true

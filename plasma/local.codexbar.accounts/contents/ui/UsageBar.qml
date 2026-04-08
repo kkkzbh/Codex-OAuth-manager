@@ -29,7 +29,7 @@ Item {
         antialiasing: true
 
         Behavior on width {
-            NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+            NumberAnimation { duration: 320; easing.type: Easing.Linear }
         }
         Behavior on color {
             ColorAnimation { duration: 200 }

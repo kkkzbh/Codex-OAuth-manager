@@ -276,7 +276,9 @@ PlasmaExtras.Representation {
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
-                text: fullRoot.rootItem.snapshot.status === "stale"
+                text: fullRoot.rootItem.actionInFlight
+                    ? i18n("Refreshing all account limits…")
+                    : fullRoot.rootItem.snapshot.status === "stale"
                     ? i18n("Some accounts are using cached data")
                     : i18n("Updated %1", fullRoot.rootItem.relativeTimestamp(fullRoot.rootItem.snapshot.generatedAt))
                 opacity: 0.6
@@ -284,17 +286,27 @@ PlasmaExtras.Representation {
                 elide: Text.ElideRight
             }
 
-            QQC2.ToolButton {
+            QQC2.Button {
+                enabled: !fullRoot.rootItem.actionInFlight
+                text: fullRoot.rootItem.actionInFlight ? i18n("Refreshing…") : i18n("Refresh all")
                 icon.name: "view-refresh"
-                display: QQC2.AbstractButton.IconOnly
+                display: QQC2.AbstractButton.TextBesideIcon
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.text: i18n("Refresh all")
                 onClicked: fullRoot.rootItem.refreshAll(true)
             }
 
+            QQC2.BusyIndicator {
+                visible: fullRoot.rootItem.actionInFlight
+                running: visible
+                implicitWidth: Kirigami.Units.iconSizes.small
+                implicitHeight: Kirigami.Units.iconSizes.small
+            }
+
             QQC2.ToolButton {
                 icon.name: "list-add"
                 display: QQC2.AbstractButton.IconOnly
+                enabled: !fullRoot.rootItem.actionInFlight
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.text: i18n("Add account")
                 onClicked: fullRoot.rootItem.addAccount()
@@ -303,6 +315,7 @@ PlasmaExtras.Representation {
             QQC2.ToolButton {
                 icon.name: "configure"
                 display: QQC2.AbstractButton.IconOnly
+                enabled: !fullRoot.rootItem.actionInFlight
                 QQC2.ToolTip.visible: hovered
                 QQC2.ToolTip.text: i18n("Configure")
                 onClicked: Plasmoid.internalAction("configure").trigger()

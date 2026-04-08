@@ -18,7 +18,7 @@ PlasmoidItem {
         : homePath + "/.local/bin"
     readonly property string collectorPathExpanded: expandPath(Plasmoid.configuration.collectorPath || "~/.local/bin/codexbar-collector")
     readonly property string codexHomePathExpanded: expandPath(Plasmoid.configuration.codexHomePath || "~/.codex")
-    readonly property int refreshIntervalSeconds: Math.max(30, Plasmoid.configuration.refreshIntervalSeconds || 90)
+    readonly property int refreshIntervalSeconds: Math.max(10, Plasmoid.configuration.refreshIntervalSeconds || 90)
     readonly property int warnPercent: Plasmoid.configuration.warnPercent || 75
     readonly property int dangerPercent: Plasmoid.configuration.dangerPercent || 90
     readonly property int liveFetchConcurrency: Math.max(1, Plasmoid.configuration.liveFetchConcurrency || 4)
@@ -61,6 +61,9 @@ PlasmoidItem {
         }
         if (isLoading) {
             return i18n("Loading Codex account limits…");
+        }
+        if (actionInFlight) {
+            return i18n("Refreshing account limits…");
         }
         if (!currentAccount) {
             return i18n("No active Codex account");
@@ -108,8 +111,14 @@ PlasmoidItem {
     }
 
     function runCommand(actionName, commandName, extraArgs, expectSnapshot) {
+        if (actionInFlight) {
+            return false;
+        }
         pendingAction = actionName;
-        actionInFlight = !expectSnapshot;
+        actionInFlight = true;
+        if (expectSnapshot) {
+            isLoading = true;
+        }
         commandInvocationSerial += 1;
         const invocationNonce = String(Date.now()) + "-" + String(commandInvocationSerial);
         const invocationCommand = "env CODEXBAR_REQUEST_NONCE="
@@ -118,6 +127,7 @@ PlasmoidItem {
             + buildBridgeCommand(commandName, extraArgs);
         executable.connectedSources = [];
         executable.connectedSources = ["sh -lc " + shellQuote(invocationCommand)];
+        return true;
     }
 
     function refreshCurrent(forceRefresh) {
@@ -174,14 +184,18 @@ PlasmoidItem {
         }
     }
 
-    function currentAccountFromSnapshot() {
-        const accounts = snapshot.accounts || [];
+    function currentAccountFromData(snapshotData) {
+        const accounts = snapshotData && snapshotData.accounts ? snapshotData.accounts : [];
         for (let index = 0; index < accounts.length; index += 1) {
             if (accounts[index].isActive) {
                 return accounts[index];
             }
         }
         return accounts.length > 0 ? accounts[0] : null;
+    }
+
+    function currentAccountFromSnapshot() {
+        return currentAccountFromData(snapshot);
     }
 
     function displayName(account) {
@@ -192,6 +206,9 @@ PlasmoidItem {
     }
 
     function currentAccountSubtitle() {
+        if (actionInFlight) {
+            return i18n("Refreshing live limits…");
+        }
         if (!currentAccount) {
             return i18n("No account data available");
         }
@@ -283,8 +300,9 @@ PlasmoidItem {
 
     PlasmaCore.Action {
         id: refreshAction
-        text: i18n("Refresh all")
+        text: root.actionInFlight ? i18n("Refreshing…") : i18n("Refresh all")
         icon.name: "view-refresh"
+        enabled: !root.actionInFlight
         onTriggered: root.refreshAll(true)
     }
 
@@ -292,6 +310,7 @@ PlasmoidItem {
         id: addAccountAction
         text: i18n("Add account")
         icon.name: "list-add"
+        enabled: !root.actionInFlight
         onTriggered: root.addAccount()
     }
 
