@@ -31,11 +31,12 @@ PlasmoidItem {
     readonly property var snapshot: allSnapshot && allSnapshot.accounts && allSnapshot.accounts.length > 0
         ? allSnapshot
         : activeSnapshot
-    readonly property var currentAccount: currentAccountFromSnapshot()
-    readonly property int currentAccountSessionPercent: currentAccount && currentAccount.session ? currentAccount.session.usedPercent : 0
-    readonly property int currentAccountWeeklyPercent: currentAccount && currentAccount.weekly ? currentAccount.weekly.usedPercent : 0
-    readonly property string currentAccountSessionLabel: currentAccount && currentAccount.session ? i18n("%1% · %2", currentAccount.session.usedPercent, currentAccount.session.resetsInLabel) : "--"
-    readonly property string currentAccountWeeklyLabel: currentAccount && currentAccount.weekly ? i18n("%1% · %2", currentAccount.weekly.usedPercent, currentAccount.weekly.resetsInLabel) : "--"
+    readonly property var currentAccount: currentAccountFromSnapshotData(snapshot)
+    readonly property string snapshotGeneratedAt: snapshot && snapshot.generatedAt ? String(snapshot.generatedAt) : ""
+    readonly property int currentAccountSessionPercent: usagePercent(currentAccount, "session")
+    readonly property int currentAccountWeeklyPercent: usagePercent(currentAccount, "weekly")
+    readonly property string currentAccountSessionLabel: usageLabel(currentAccount, "session")
+    readonly property string currentAccountWeeklyLabel: usageLabel(currentAccount, "weekly")
 
     property bool isLoading: true
     property bool actionInFlight: false
@@ -86,7 +87,7 @@ PlasmoidItem {
                     currentAccountSessionPercent,
                     currentAccountWeeklyPercent,
                     currentAccount.usageSource === "live" ? i18n("Live") : i18n("Cached"),
-                    relativeTimestamp(snapshot.generatedAt));
+                    relativeTimestamp(snapshotGeneratedAt));
     }
 
     function expandPath(pathValue) {
@@ -152,12 +153,18 @@ PlasmoidItem {
         runCommand("snapshot-active", "snapshot", args, true);
     }
 
-    function refreshAll(forceRefresh) {
+    function refreshAll(forceRefresh, actionName) {
         const args = [];
         if (forceRefresh) {
             args.push("--force-refresh");
         }
-        runCommand("snapshot-all", "snapshot", args, true);
+        runCommand(actionName || "snapshot-all", "snapshot", args, true);
+    }
+
+    function refreshBackground() {
+        // Background polling keeps every account row fresh, but it should still
+        // respect collector backoff for accounts that are consistently failing.
+        refreshAll(false, "snapshot-background");
     }
 
     function addAccount() {
@@ -222,6 +229,7 @@ PlasmoidItem {
         try {
             const parsed = JSON.parse(stdout);
             if (!parsed.accounts) parsed.accounts = [];
+            logActiveAccountDiagnostics(parsed);
             if (activeOnly) {
                 activeSnapshot = parsed;
             } else {
@@ -236,8 +244,22 @@ PlasmoidItem {
         }
     }
 
-    function currentAccountFromData(snapshotData) {
+    function accountKey(account) {
+        return account && account.accountKey ? String(account.accountKey) : "";
+    }
+
+    function currentAccountFromSnapshotData(snapshotData) {
         const accounts = snapshotData && snapshotData.accounts ? snapshotData.accounts : [];
+        const activeAccountKey = snapshotData && snapshotData.activeAccountKey
+            ? String(snapshotData.activeAccountKey)
+            : "";
+        if (activeAccountKey.length > 0) {
+            for (let index = 0; index < accounts.length; index += 1) {
+                if (accountKey(accounts[index]) === activeAccountKey) {
+                    return accounts[index];
+                }
+            }
+        }
         for (let index = 0; index < accounts.length; index += 1) {
             if (accounts[index].isActive) {
                 return accounts[index];
@@ -246,9 +268,70 @@ PlasmoidItem {
         return accounts.length > 0 ? accounts[0] : null;
     }
 
-    function currentAccountFromSnapshot() {
-        const activeAccount = currentAccountFromData(activeSnapshot);
-        return activeAccount ? activeAccount : currentAccountFromData(snapshot);
+    function isCurrentAccount(account) {
+        return accountKey(account).length > 0
+            && accountKey(account) === accountKey(currentAccount);
+    }
+
+    function usageWindow(account, windowName) {
+        if (!account) {
+            return null;
+        }
+        if (windowName === "session") {
+            return account.session || null;
+        }
+        if (windowName === "weekly") {
+            return account.weekly || null;
+        }
+        console.warn("[codexbar-accounts] unknown usage window `" + String(windowName) + "`");
+        return null;
+    }
+
+    function usagePercent(account, windowName) {
+        const window = usageWindow(account, windowName);
+        return window ? Number(window.usedPercent || 0) : 0;
+    }
+
+    function usageLabel(account, windowName) {
+        const window = usageWindow(account, windowName);
+        return window
+            ? i18n("%1% · %2", window.usedPercent, window.resetsInLabel)
+            : "--";
+    }
+
+    function logActiveAccountDiagnostics(snapshotData) {
+        const accounts = snapshotData && snapshotData.accounts ? snapshotData.accounts : [];
+        if (accounts.length === 0) {
+            return;
+        }
+
+        const activeAccountKey = snapshotData && snapshotData.activeAccountKey
+            ? String(snapshotData.activeAccountKey)
+            : "";
+        let activeKeyMatch = null;
+        const flaggedKeys = [];
+
+        for (let index = 0; index < accounts.length; index += 1) {
+            const key = accountKey(accounts[index]);
+            if (activeAccountKey.length > 0 && key === activeAccountKey) {
+                activeKeyMatch = accounts[index];
+            }
+            if (accounts[index].isActive) {
+                flaggedKeys.push(key);
+            }
+        }
+
+        if (activeAccountKey.length > 0 && !activeKeyMatch) {
+            console.warn("[codexbar-accounts] snapshot activeAccountKey `" + activeAccountKey + "` was not found in accounts");
+        }
+
+        if (flaggedKeys.length > 1) {
+            const resolvedKey = activeKeyMatch
+                ? accountKey(activeKeyMatch)
+                : flaggedKeys[0];
+            console.warn("[codexbar-accounts] snapshot reported multiple active accounts [" + flaggedKeys.join(", ")
+                + "]; resolving to `" + resolvedKey + "`");
+        }
     }
 
     function displayName(account) {
@@ -306,7 +389,7 @@ PlasmoidItem {
         return i18n("%1 · %2 · %3",
                     currentAccount.plan,
                     currentAccount.usageSource === "live" ? i18n("Live") : i18n("Cached"),
-                    relativeTimestamp(currentAccount.generatedAt || snapshot.generatedAt));
+                    relativeTimestamp(snapshotGeneratedAt));
     }
 
     function relativeTimestamp(value) {
@@ -359,10 +442,10 @@ PlasmoidItem {
                 return;
             }
 
-            if (action === "snapshot-active" || action === "snapshot-all") {
+            if (action === "snapshot-active" || action === "snapshot-all" || action === "snapshot-background") {
                 root.parseSnapshot(stdout, action === "snapshot-active");
                 root.actionInFlight = false;
-                if (root.autoSwitchEnabled && action === "snapshot-active") {
+                if (root.autoSwitchEnabled && (action === "snapshot-active" || action === "snapshot-background")) {
                     root.maybeAutoSwitch();
                 }
                 return;
@@ -383,7 +466,7 @@ PlasmoidItem {
         interval: root.refreshIntervalSeconds * 1000
         repeat: true
         running: true
-        onTriggered: root.expanded ? root.refreshAll(true) : root.refreshCurrent(true)
+        onTriggered: root.refreshBackground()
     }
 
     Component.onCompleted: refreshAll(true)

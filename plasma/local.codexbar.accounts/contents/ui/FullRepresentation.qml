@@ -161,11 +161,11 @@ QQC2.Control {
                         }
                         UsageBar {
                             Layout.fillWidth: true
-                            percent: fullRoot.rootItem.currentAccountSessionPercent
+                            percent: fullRoot.rootItem.usagePercent(fullRoot.rootItem.currentAccount, "session")
                             fillColor: fullRoot.rootItem.barColor(percent)
                         }
                         PlasmaComponents3.Label {
-                            text: fullRoot.rootItem.currentAccountSessionLabel
+                            text: fullRoot.rootItem.usageLabel(fullRoot.rootItem.currentAccount, "session")
                             Layout.preferredWidth: fullRoot.meterValueWidth
                             horizontalAlignment: Text.AlignRight
                             elide: Text.ElideRight
@@ -181,11 +181,11 @@ QQC2.Control {
                         }
                         UsageBar {
                             Layout.fillWidth: true
-                            percent: fullRoot.rootItem.currentAccountWeeklyPercent
+                            percent: fullRoot.rootItem.usagePercent(fullRoot.rootItem.currentAccount, "weekly")
                             fillColor: fullRoot.rootItem.barColor(percent)
                         }
                         PlasmaComponents3.Label {
-                            text: fullRoot.rootItem.currentAccountWeeklyLabel
+                            text: fullRoot.rootItem.usageLabel(fullRoot.rootItem.currentAccount, "weekly")
                             Layout.preferredWidth: fullRoot.meterValueWidth
                             horizontalAlignment: Text.AlignRight
                             elide: Text.ElideRight
@@ -262,10 +262,11 @@ QQC2.Control {
 
                 delegate: Rectangle {
                     required property var modelData
+                    readonly property bool rowIsCurrent: fullRoot.rootItem.isCurrentAccount(modelData)
                     width: ListView.view.width
                     radius: Kirigami.Units.smallSpacing
-                    color: modelData.isActive ? Qt.rgba(0.2, 0.45, 0.95, 0.08) : "transparent"
-                    border.width: modelData.isActive ? 1 : 0
+                    color: rowIsCurrent ? Qt.rgba(0.2, 0.45, 0.95, 0.08) : "transparent"
+                    border.width: rowIsCurrent ? 1 : 0
                     border.color: Qt.rgba(0.2, 0.45, 0.95, 0.25)
                     implicitHeight: delegateLayout.implicitHeight + Kirigami.Units.smallSpacing * 2
 
@@ -311,13 +312,11 @@ QQC2.Control {
                                 }
                                 UsageBar {
                                     Layout.fillWidth: true
-                                    percent: modelData.session ? modelData.session.usedPercent : 0
+                                    percent: fullRoot.rootItem.usagePercent(modelData, "session")
                                     fillColor: fullRoot.rootItem.barColor(percent)
                                 }
                                 PlasmaComponents3.Label {
-                                    text: modelData.session
-                                        ? i18n("%1% · %2", modelData.session.usedPercent, modelData.session.resetsInLabel)
-                                        : "--"
+                                    text: fullRoot.rootItem.usageLabel(modelData, "session")
                                     Layout.preferredWidth: fullRoot.meterValueWidth
                                     horizontalAlignment: Text.AlignRight
                                     elide: Text.ElideRight
@@ -333,13 +332,11 @@ QQC2.Control {
                                 }
                                 UsageBar {
                                     Layout.fillWidth: true
-                                    percent: modelData.weekly ? modelData.weekly.usedPercent : 0
+                                    percent: fullRoot.rootItem.usagePercent(modelData, "weekly")
                                     fillColor: fullRoot.rootItem.barColor(percent)
                                 }
                                 PlasmaComponents3.Label {
-                                    text: modelData.weekly
-                                        ? i18n("%1% · %2", modelData.weekly.usedPercent, modelData.weekly.resetsInLabel)
-                                        : "--"
+                                    text: fullRoot.rootItem.usageLabel(modelData, "weekly")
                                     Layout.preferredWidth: fullRoot.meterValueWidth
                                     horizontalAlignment: Text.AlignRight
                                     elide: Text.ElideRight
@@ -355,8 +352,8 @@ QQC2.Control {
 
                             QQC2.Button {
                                 Layout.fillWidth: true
-                                text: modelData.isActive ? i18n("Active") : i18n("Switch")
-                                enabled: !modelData.isActive && !fullRoot.rootItem.actionInFlight
+                                text: rowIsCurrent ? i18n("Active") : i18n("Switch")
+                                enabled: !rowIsCurrent && !fullRoot.rootItem.actionInFlight
                                 onClicked: fullRoot.rootItem.activateAccount(modelData.accountKey)
                             }
 
@@ -367,14 +364,14 @@ QQC2.Control {
                             // rate-limit window without the user having to
                             // switch to it first.
                             QQC2.ToolButton {
-                                opacity: modelData.isActive ? 0 : 1
-                                enabled: !modelData.isActive && !fullRoot.rootItem.actionInFlight
+                                opacity: rowIsCurrent ? 0 : 1
+                                enabled: !rowIsCurrent && !fullRoot.rootItem.actionInFlight
                                 icon.name: "media-playback-start"
                                 display: QQC2.AbstractButton.IconOnly
-                                QQC2.ToolTip.visible: hovered && !modelData.isActive
+                                QQC2.ToolTip.visible: hovered && !rowIsCurrent
                                 QQC2.ToolTip.text: i18n("Start 5h window (send a tiny request)")
                                 onClicked: {
-                                    if (!modelData.isActive) {
+                                    if (!rowIsCurrent) {
                                         fullRoot.rootItem.warmupAccount(modelData.accountKey);
                                     }
                                 }
@@ -384,14 +381,14 @@ QQC2.Control {
                             // Switch/Active button has the same width on
                             // every row.
                             QQC2.ToolButton {
-                                opacity: modelData.isActive ? 0 : 1
-                                enabled: !modelData.isActive && !fullRoot.rootItem.actionInFlight
+                                opacity: rowIsCurrent ? 0 : 1
+                                enabled: !rowIsCurrent && !fullRoot.rootItem.actionInFlight
                                 icon.name: "edit-delete"
                                 display: QQC2.AbstractButton.IconOnly
-                                QQC2.ToolTip.visible: hovered && !modelData.isActive
+                                QQC2.ToolTip.visible: hovered && !rowIsCurrent
                                 QQC2.ToolTip.text: i18n("Delete account")
                                 onClicked: {
-                                    if (!modelData.isActive) {
+                                    if (!rowIsCurrent) {
                                         fullRoot.rootItem.removeAccount(modelData.accountKey);
                                     }
                                 }
@@ -411,8 +408,9 @@ QQC2.Control {
                 text: fullRoot.rootItem.actionInFlight
                     ? i18n("Refreshing all account limits…")
                     : fullRoot.rootItem.snapshot.status === "stale"
-                    ? i18n("Some accounts are using cached data")
-                    : i18n("Updated %1", fullRoot.rootItem.relativeTimestamp(fullRoot.rootItem.snapshot.generatedAt))
+                    ? i18n("Some accounts are using cached data · %1",
+                           fullRoot.rootItem.relativeTimestamp(fullRoot.rootItem.snapshotGeneratedAt))
+                    : fullRoot.rootItem.relativeTimestamp(fullRoot.rootItem.snapshotGeneratedAt)
                 opacity: 0.6
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                 elide: Text.ElideRight
