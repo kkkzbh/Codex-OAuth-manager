@@ -18,7 +18,7 @@ PlasmoidItem {
         : homePath + "/.local/bin"
     readonly property string collectorPathExpanded: expandPath(Plasmoid.configuration.collectorPath || "~/.local/bin/codexbar-collector")
     readonly property string codexHomePathExpanded: expandPath(Plasmoid.configuration.codexHomePath || "~/.codex")
-    readonly property int refreshIntervalSeconds: Math.max(10, Plasmoid.configuration.refreshIntervalSeconds || 90)
+    readonly property int refreshIntervalSeconds: Math.max(10, Plasmoid.configuration.refreshIntervalSeconds || 120)
     readonly property int warnPercent: Plasmoid.configuration.warnPercent || 75
     readonly property int dangerPercent: Plasmoid.configuration.dangerPercent || 90
     readonly property int liveFetchConcurrency: Math.max(1, Plasmoid.configuration.liveFetchConcurrency || 4)

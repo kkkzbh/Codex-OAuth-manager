@@ -16,7 +16,7 @@
       <default>~/.codex</default>
     </entry>
     <entry name="refreshIntervalSeconds" type="Int">
-      <default>90</default>
+      <default>120</default>
     </entry>
     <entry name="warnPercent" type="Int">
       <default>75</default>

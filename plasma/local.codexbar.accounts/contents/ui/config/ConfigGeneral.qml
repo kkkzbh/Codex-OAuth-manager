@@ -48,6 +48,9 @@ Kirigami.FormLayout {
         editable: true
         onValueModified: page.cfg_refreshIntervalSeconds = value
         textFromValue: function(value) { return i18n("%1 seconds", value) }
+        valueFromText: function(text) {
+            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_refreshIntervalSeconds || 120
+        }
     }
 
     QQC2.SpinBox {
@@ -97,6 +100,9 @@ Kirigami.FormLayout {
         editable: true
         onValueModified: page.cfg_liveFetchTimeoutSeconds = value
         textFromValue: function(value) { return i18n("%1 seconds", value) }
+        valueFromText: function(text) {
+            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_liveFetchTimeoutSeconds || 8
+        }
     }
 
     QQC2.CheckBox {
