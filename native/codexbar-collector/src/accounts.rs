@@ -16,8 +16,11 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
 const USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+const RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const WARMUP_MODEL: &str = "gpt-5";
+const WARMUP_PROMPT: &str = "ok";
 const DEFAULT_SOFT_TTL_SECONDS: i64 = 60;
 const DEFAULT_HARD_TTL_SECONDS: i64 = 15 * 60;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 8;
@@ -518,6 +521,106 @@ pub fn activate_account(paths: &AccountsPaths, account_key: &str, now: DateTime<
         account_key: Some(account_key.to_string()),
         message: format!("Activated account {account_key}"),
     })
+}
+
+pub fn warmup_account(
+    paths: &AccountsPaths,
+    account_key: &str,
+    timeout: StdDuration,
+) -> Result<AccountActionResult> {
+    let registry = read_registry(&paths.registry_path)?;
+    let registry_account = registry
+        .accounts
+        .iter()
+        .find(|account| account.account_key == account_key)
+        .cloned()
+        .with_context(|| format!("Unknown account key: {account_key}"))?;
+    let account_id = registry_account
+        .chatgpt_account_id
+        .clone()
+        .ok_or_else(|| anyhow!("Account {account_key} is missing chatgptAccountId"))?;
+
+    let auth_files = discover_auth_files(&paths.accounts_dir)?;
+    let (auth_path, mut auth_file) = auth_files
+        .get(&account_id)
+        .cloned()
+        .with_context(|| format!("Missing auth file for account {account_key}"))?;
+
+    let client = build_http_client(timeout)?;
+
+    let mut response = send_responses_warmup(&client, &auth_file, Some(account_id.as_str()))?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        refresh_auth_tokens(&client, &mut auth_file)?;
+        let bytes = serde_json::to_vec_pretty(&auth_file)
+            .context("Failed to serialize refreshed auth file")?;
+        atomic_write(&auth_path, &bytes)?;
+        response = send_responses_warmup(&client, &auth_file, Some(account_id.as_str()))?;
+    }
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "<unreadable body>".to_string());
+        bail!("Warm-up request returned {status}: {body}");
+    }
+
+    // Drain the body so the connection can be returned to the pool. We don't
+    // need the contents — the request itself is what registers the message
+    // against the account's 5h window on OpenAI's backend.
+    let _ = response.bytes();
+
+    Ok(AccountActionResult {
+        ok: true,
+        action: "warmup".to_string(),
+        account_key: Some(account_key.to_string()),
+        message: format!("Warm-up request sent for {account_key}"),
+    })
+}
+
+fn send_responses_warmup(
+    client: &Client,
+    auth_file: &AuthFile,
+    chatgpt_account_id: Option<&str>,
+) -> Result<reqwest::blocking::Response> {
+    let access_token = auth_file
+        .tokens
+        .access_token
+        .as_deref()
+        .ok_or_else(|| anyhow!("Auth file is missing access_token"))?;
+
+    // Minimal Responses API payload. The endpoint *requires* `stream: true`
+    // (it returns 400 "Stream must be set to true" otherwise), so we ask for
+    // the cheapest possible streamed response and drain it. `store: false`
+    // avoids polluting the account's saved history; `max_output_tokens: 16`
+    // keeps token spend trivial. The goal isn't to get a useful answer —
+    // just to ping the Responses endpoint as this account so OpenAI starts
+    // the rolling 5h rate-limit window.
+    let body = serde_json::json!({
+        "model": WARMUP_MODEL,
+        "instructions": "Reply with the single word: ok",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": WARMUP_PROMPT }]
+        }],
+        "store": false,
+        "stream": true
+    });
+
+    let mut request = client
+        .post(RESPONSES_ENDPOINT)
+        .bearer_auth(access_token)
+        .header("Accept", "text/event-stream")
+        .header("OpenAI-Beta", "responses=experimental")
+        .json(&body);
+    if let Some(id) = chatgpt_account_id {
+        request = request.header("chatgpt-account-id", id);
+    }
+
+    request
+        .send()
+        .context("Failed to send warm-up request to Responses endpoint")
 }
 
 pub fn remove_account(paths: &AccountsPaths, account_key: &str) -> Result<AccountActionResult> {

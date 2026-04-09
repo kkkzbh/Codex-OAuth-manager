@@ -19,7 +19,7 @@ QQC2.Control {
     readonly property real identityColumnWidth: Kirigami.Units.gridUnit * 11
     readonly property real meterLabelWidth: Kirigami.Units.gridUnit * 2
     readonly property real meterValueWidth: Kirigami.Units.gridUnit * 7.5
-    readonly property real actionsColumnWidth: Kirigami.Units.gridUnit * 7
+    readonly property real actionsColumnWidth: Kirigami.Units.gridUnit * 9
     readonly property real accountRowSpacing: Kirigami.Units.smallSpacing
     readonly property real accountRowEstimatedHeight: Kirigami.Units.gridUnit * 3.6
 
@@ -358,6 +358,26 @@ QQC2.Control {
                                 text: modelData.isActive ? i18n("Active") : i18n("Switch")
                                 enabled: !modelData.isActive && !fullRoot.rootItem.actionInFlight
                                 onClicked: fullRoot.rootItem.activateAccount(modelData.accountKey)
+                            }
+
+                            // Kept in layout (not `visible: false`) so the
+                            // Switch/Active button has the same width on
+                            // every row. Sends a tiny Responses-API request
+                            // as that account so OpenAI starts its 5h
+                            // rate-limit window without the user having to
+                            // switch to it first.
+                            QQC2.ToolButton {
+                                opacity: modelData.isActive ? 0 : 1
+                                enabled: !modelData.isActive && !fullRoot.rootItem.actionInFlight
+                                icon.name: "media-playback-start"
+                                display: QQC2.AbstractButton.IconOnly
+                                QQC2.ToolTip.visible: hovered && !modelData.isActive
+                                QQC2.ToolTip.text: i18n("Start 5h window (send a tiny request)")
+                                onClicked: {
+                                    if (!modelData.isActive) {
+                                        fullRoot.rootItem.warmupAccount(modelData.accountKey);
+                                    }
+                                }
                             }
 
                             // Kept in layout (not `visible: false`) so the

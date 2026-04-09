@@ -8,6 +8,7 @@ REFRESH_INTERVAL_SECONDS="${REFRESH_INTERVAL_SECONDS:-120}"
 SOFT_TTL_SECONDS="${SOFT_TTL_SECONDS:-60}"
 HARD_TTL_SECONDS="${HARD_TTL_SECONDS:-900}"
 FETCH_TIMEOUT_SECONDS="${FETCH_TIMEOUT_SECONDS:-8}"
+WARMUP_TIMEOUT_SECONDS="${WARMUP_TIMEOUT_SECONDS:-30}"
 FETCH_CONCURRENCY="${FETCH_CONCURRENCY:-4}"
 CODEX_HOME_PATH="${CODEX_HOME_PATH:-${CODEX_HOME:-$HOME/.codex}}"
 TERMINAL_COMMAND="${TERMINAL_COMMAND:-}"
@@ -41,6 +42,11 @@ case "$cmd" in
     ;;
   remove)
     exec "$COLLECTOR_PATH" account remove --codex-home "$CODEX_HOME_PATH" "$@"
+    ;;
+  warmup)
+    exec "$COLLECTOR_PATH" account warmup --codex-home "$CODEX_HOME_PATH" \
+      --timeout-seconds "$WARMUP_TIMEOUT_SECONDS" \
+      "$@"
     ;;
   login)
     if [[ -n "$TERMINAL_COMMAND" ]]; then

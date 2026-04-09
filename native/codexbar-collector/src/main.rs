@@ -4,7 +4,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use codexbar_collector::accounts::{
     AccountsPaths, AccountsSnapshotOptions, AutoSwitchOptions, activate_account, auto_switch_account,
-    load_accounts_snapshot, remove_account, spawn_account_login,
+    load_accounts_snapshot, remove_account, spawn_account_login, warmup_account,
 };
 use codexbar_collector::{BuildPaths, SnapshotOptions, load_snapshot};
 
@@ -77,6 +77,7 @@ enum AccountCommand {
     Remove(AccountRemoveArgs),
     Login(AccountLoginArgs),
     AutoSwitch(AccountAutoSwitchArgs),
+    Warmup(AccountWarmupArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -101,6 +102,16 @@ struct AccountLoginArgs {
     terminal: Option<String>,
     #[arg(long)]
     command: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct AccountWarmupArgs {
+    #[arg(long)]
+    codex_home: Option<PathBuf>,
+    #[arg(long)]
+    account_key: String,
+    #[arg(long, default_value_t = 30)]
+    timeout_seconds: u64,
 }
 
 #[derive(Debug, Parser)]
@@ -206,6 +217,15 @@ fn run() -> anyhow::Result<()> {
             }
             AccountCommand::Login(args) => {
                 let result = spawn_account_login(args.terminal.as_deref(), args.command.as_deref())?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            AccountCommand::Warmup(args) => {
+                let paths = account_paths_from_codex_home(args.codex_home);
+                let result = warmup_account(
+                    &paths,
+                    &args.account_key,
+                    Duration::from_secs(args.timeout_seconds),
+                )?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
             AccountCommand::AutoSwitch(args) => {

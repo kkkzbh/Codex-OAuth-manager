@@ -198,6 +198,14 @@ PlasmoidItem {
         runCommand("remove", "remove", ["--account-key", shellQuote(accountKey)], false);
     }
 
+    function warmupAccount(accountKey) {
+        // Sends a tiny Responses-API request as that account so OpenAI starts
+        // its rolling 5h rate-limit window. The default post-action handler
+        // (`onNewData`) then runs `refreshAll(true)`, which re-fetches usage
+        // for every account and surfaces the new 5h bar value.
+        runCommand("warmup", "warmup", ["--account-key", shellQuote(accountKey)], false);
+    }
+
     function maybeAutoSwitch() {
         if (!autoSwitchEnabled || actionInFlight) {
             return;
