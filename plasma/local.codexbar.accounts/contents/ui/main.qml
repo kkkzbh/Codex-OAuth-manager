@@ -165,7 +165,33 @@ PlasmoidItem {
     }
 
     function activateAccount(accountKey) {
+        // Optimistically flip the active flag locally so the UI updates the
+        // moment the user clicks Switch, instead of waiting for the activate
+        // command + follow-up snapshot to round-trip through the collector.
+        applyOptimisticActive(accountKey);
         runCommand("activate", "activate", ["--account-key", shellQuote(accountKey)], false);
+    }
+
+    function applyOptimisticActive(accountKey) {
+        activeSnapshot = withActiveAccount(activeSnapshot, accountKey);
+        allSnapshot = withActiveAccount(allSnapshot, accountKey);
+    }
+
+    function withActiveAccount(snapshotData, accountKey) {
+        if (!snapshotData || !snapshotData.accounts) {
+            return snapshotData;
+        }
+        const updatedAccounts = snapshotData.accounts.map(function(account) {
+            const isActive = account.accountKey === accountKey;
+            if (account.isActive === isActive) {
+                return account;
+            }
+            return Object.assign({}, account, { isActive: isActive });
+        });
+        return Object.assign({}, snapshotData, {
+            accounts: updatedAccounts,
+            activeAccountKey: accountKey
+        });
     }
 
     function removeAccount(accountKey) {
@@ -335,7 +361,12 @@ PlasmoidItem {
             }
 
             root.actionInFlight = false;
-            root.refreshAll(true);
+            // For activate/remove the cached usage data is still valid — only the
+            // active flag changes, which the collector reads fresh from the registry
+            // on every snapshot. Skip --force-refresh so the panel updates immediately
+            // instead of waiting for live HTTP fetches across every account.
+            const skipForce = action === "activate" || action === "remove";
+            root.refreshAll(!skipForce);
         }
     }
 
