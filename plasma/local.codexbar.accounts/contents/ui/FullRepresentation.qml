@@ -9,24 +9,53 @@ import org.kde.plasma.components as PlasmaComponents3
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.plasma.plasmoid
 
-PlasmaExtras.Representation {
+QQC2.Control {
     id: fullRoot
 
     required property PlasmoidItem rootItem
 
-    collapseMarginsHint: true
+    // Column widths shared by the "Current account" block and the per-account
+    // delegate so everything lines up in a strict grid.
+    readonly property real identityColumnWidth: Kirigami.Units.gridUnit * 11
+    readonly property real meterLabelWidth: Kirigami.Units.gridUnit * 2
+    readonly property real meterValueWidth: Kirigami.Units.gridUnit * 7.5
+    readonly property real actionsColumnWidth: Kirigami.Units.gridUnit * 7
+    readonly property real accountRowSpacing: Kirigami.Units.smallSpacing
+    readonly property real accountRowEstimatedHeight: Kirigami.Units.gridUnit * 3.6
 
-    Layout.minimumWidth: Kirigami.Units.gridUnit * 24
-    Layout.preferredWidth: Kirigami.Units.gridUnit * 30
-    Layout.maximumWidth: Kirigami.Units.gridUnit * 34
-    Layout.minimumHeight: Kirigami.Units.gridUnit * 22
+    readonly property int maxVisibleAccountRows: 8
+    readonly property int accountCount: (fullRoot.rootItem.snapshot.accounts || []).length
+    readonly property int visibleAccountRowCount: Math.min(accountCount, maxVisibleAccountRows)
+
+    leftPadding: Kirigami.Units.largeSpacing * 1.2
+    rightPadding: Kirigami.Units.largeSpacing * 1.2
+    topPadding: Kirigami.Units.largeSpacing
+    bottomPadding: Kirigami.Units.largeSpacing
+
+    // Propagate sizing from the contentItem (systemmonitor pattern). This is
+    // what actually drives the popup window height — the Plasma popup reads
+    // Layout.preferredHeight on the full representation.
+    //
+    // We also pin min == preferred == max on both axes. Plasma only exposes
+    // the Alt+drag resize handles (and persists popupWidth/popupHeight) when
+    // min < max, so collapsing them locks the popup to our computed size and
+    // prevents the user from accidentally shrinking it.
+    readonly property real _popupWidth: Kirigami.Units.gridUnit * 36
+        + leftPadding + rightPadding
+    readonly property real _popupHeight: (contentItem ? contentItem.implicitHeight : 0)
+        + topPadding + bottomPadding
+
+    Layout.minimumWidth: _popupWidth
+    Layout.preferredWidth: _popupWidth
+    Layout.maximumWidth: _popupWidth
+    Layout.minimumHeight: _popupHeight
+    Layout.preferredHeight: _popupHeight
+    Layout.maximumHeight: _popupHeight
 
     contentItem: ColumnLayout {
+        id: contentLayout
+
         spacing: Kirigami.Units.largeSpacing
-        anchors.leftMargin: Kirigami.Units.largeSpacing * 1.2
-        anchors.rightMargin: Kirigami.Units.largeSpacing * 1.2
-        anchors.topMargin: Kirigami.Units.largeSpacing
-        anchors.bottomMargin: Kirigami.Units.largeSpacing
 
         RowLayout {
             Layout.fillWidth: true
@@ -46,6 +75,7 @@ PlasmaExtras.Representation {
                     level: 2
                     text: i18n("Codex account limits")
                     Layout.fillWidth: true
+                    elide: Text.ElideRight
                 }
 
                 PlasmaComponents3.Label {
@@ -63,15 +93,18 @@ PlasmaExtras.Representation {
             }
 
             PlasmaComponents3.Label {
-                text: fullRoot.rootItem.currentAccount ? fullRoot.rootItem.displayName(fullRoot.rootItem.currentAccount) : ""
+                text: fullRoot.rootItem.currentAccount
+                    ? fullRoot.rootItem.displayName(fullRoot.rootItem.currentAccount)
+                    : ""
                 opacity: 0.75
                 font.weight: Font.DemiBold
+                Layout.alignment: Qt.AlignVCenter
             }
         }
 
         Rectangle {
             Layout.fillWidth: true
-            height: 1
+            implicitHeight: 1
             color: Qt.rgba(Kirigami.Theme.textColor.r,
                            Kirigami.Theme.textColor.g,
                            Kirigami.Theme.textColor.b, 0.10)
@@ -89,32 +122,42 @@ PlasmaExtras.Representation {
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: Kirigami.Units.largeSpacing
+                spacing: Kirigami.Units.largeSpacing * 0.75
 
                 ColumnLayout {
-                    Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+                    Layout.preferredWidth: fullRoot.identityColumnWidth
+                    Layout.maximumWidth: fullRoot.identityColumnWidth
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: Kirigami.Units.smallSpacing / 2
+
                     PlasmaComponents3.Label {
-                        text: fullRoot.rootItem.currentAccount ? fullRoot.rootItem.currentAccount.plan : ""
+                        Layout.fillWidth: true
+                        text: fullRoot.rootItem.currentAccount
+                            ? fullRoot.rootItem.currentAccount.plan
+                            : ""
                         font.weight: Font.DemiBold
+                        elide: Text.ElideRight
                     }
                     PlasmaComponents3.Label {
-                        text: fullRoot.rootItem.currentAccount && fullRoot.rootItem.currentAccount.usageSource === "live"
-                            ? i18n("Live")
-                            : i18n("Cached")
-                        opacity: 0.6
+                        Layout.fillWidth: true
+                        text: fullRoot.rootItem.accountSecondaryText(fullRoot.rootItem.currentAccount, false)
+                        opacity: 0.72
                         font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                        elide: Text.ElideRight
                     }
                 }
 
                 ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: Kirigami.Units.smallSpacing
+                    Layout.alignment: Qt.AlignVCenter
+                    spacing: Kirigami.Units.smallSpacing / 2
 
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
                         PlasmaComponents3.Label {
                             text: i18n("5h")
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 2
+                            Layout.preferredWidth: fullRoot.meterLabelWidth
                         }
                         UsageBar {
                             Layout.fillWidth: true
@@ -123,16 +166,18 @@ PlasmaExtras.Representation {
                         }
                         PlasmaComponents3.Label {
                             text: fullRoot.rootItem.currentAccountSessionLabel
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                            Layout.preferredWidth: fullRoot.meterValueWidth
                             horizontalAlignment: Text.AlignRight
+                            elide: Text.ElideRight
                         }
                     }
 
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: Kirigami.Units.smallSpacing
                         PlasmaComponents3.Label {
                             text: i18n("1w")
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 2
+                            Layout.preferredWidth: fullRoot.meterLabelWidth
                         }
                         UsageBar {
                             Layout.fillWidth: true
@@ -141,17 +186,24 @@ PlasmaExtras.Representation {
                         }
                         PlasmaComponents3.Label {
                             text: fullRoot.rootItem.currentAccountWeeklyLabel
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 6
+                            Layout.preferredWidth: fullRoot.meterValueWidth
                             horizontalAlignment: Text.AlignRight
+                            elide: Text.ElideRight
                         }
                     }
+                }
+
+                // Spacer aligning with the per-account action column below.
+                Item {
+                    Layout.preferredWidth: fullRoot.actionsColumnWidth
+                    Layout.fillHeight: true
                 }
             }
         }
 
         Rectangle {
             Layout.fillWidth: true
-            height: 1
+            implicitHeight: 1
             color: Qt.rgba(Kirigami.Theme.textColor.r,
                            Kirigami.Theme.textColor.g,
                            Kirigami.Theme.textColor.b, 0.10)
@@ -162,14 +214,51 @@ PlasmaExtras.Representation {
             text: i18n("Accounts")
         }
 
-        QQC2.ScrollView {
+        // Wrap the ListView in an Item so we can set an explicit implicit
+        // height that propagates upward through the ColumnLayout → Control →
+        // popup. A ScrollView would swallow the implicit size.
+        Item {
+            id: accountsViewport
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            Layout.preferredHeight: accountsList.preferredViewportHeight
+            implicitHeight: accountsList.preferredViewportHeight
+            clip: true
 
             ListView {
+                id: accountsList
+
+                // Viewport height capped at `maxVisibleAccountRows`. Uses the
+                // measured contentHeight when available, otherwise falls back
+                // to an estimate so the popup sizes correctly on the first
+                // frame (before delegates are instantiated).
+                readonly property real preferredViewportHeight: {
+                    const visible = Math.min(count, fullRoot.maxVisibleAccountRows);
+                    if (visible <= 0) {
+                        return 0;
+                    }
+                    if (count > 0 && contentHeight > 0) {
+                        if (visible >= count) {
+                            return contentHeight;
+                        }
+                        const rowHeight = (contentHeight - spacing * Math.max(0, count - 1)) / count;
+                        return rowHeight * visible + spacing * Math.max(0, visible - 1);
+                    }
+                    return fullRoot.accountRowEstimatedHeight * visible
+                        + spacing * Math.max(0, visible - 1);
+                }
+
+                anchors.fill: parent
                 model: fullRoot.rootItem.snapshot.accounts || []
-                spacing: Kirigami.Units.largeSpacing * 0.6
+                spacing: fullRoot.accountRowSpacing
                 clip: true
+                reuseItems: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                QQC2.ScrollBar.vertical: QQC2.ScrollBar {
+                    policy: accountsList.contentHeight > accountsList.height
+                        ? QQC2.ScrollBar.AsNeeded
+                        : QQC2.ScrollBar.AlwaysOff
+                }
 
                 delegate: Rectangle {
                     required property var modelData
@@ -187,7 +276,10 @@ PlasmaExtras.Representation {
                         spacing: Kirigami.Units.largeSpacing * 0.75
 
                         ColumnLayout {
-                            Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+                            Layout.preferredWidth: fullRoot.identityColumnWidth
+                            Layout.maximumWidth: fullRoot.identityColumnWidth
+                            Layout.alignment: Qt.AlignVCenter
+                            spacing: Kirigami.Units.smallSpacing / 2
 
                             PlasmaComponents3.Label {
                                 Layout.fillWidth: true
@@ -198,8 +290,8 @@ PlasmaExtras.Representation {
 
                             PlasmaComponents3.Label {
                                 Layout.fillWidth: true
-                                text: modelData.plan + " · " + (modelData.usageSource === "live" ? i18n("Live") : i18n("Cached"))
-                                opacity: 0.65
+                                text: fullRoot.rootItem.accountSecondaryText(modelData, true)
+                                opacity: 0.72
                                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                                 elide: Text.ElideRight
                             }
@@ -207,13 +299,15 @@ PlasmaExtras.Representation {
 
                         ColumnLayout {
                             Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
                             spacing: Kirigami.Units.smallSpacing / 2
 
                             RowLayout {
                                 Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
                                 PlasmaComponents3.Label {
                                     text: i18n("5h")
-                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 2
+                                    Layout.preferredWidth: fullRoot.meterLabelWidth
                                 }
                                 UsageBar {
                                     Layout.fillWidth: true
@@ -221,17 +315,21 @@ PlasmaExtras.Representation {
                                     fillColor: fullRoot.rootItem.barColor(percent)
                                 }
                                 PlasmaComponents3.Label {
-                                    text: modelData.session ? i18n("%1% · %2", modelData.session.usedPercent, modelData.session.resetsInLabel) : "--"
-                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+                                    text: modelData.session
+                                        ? i18n("%1% · %2", modelData.session.usedPercent, modelData.session.resetsInLabel)
+                                        : "--"
+                                    Layout.preferredWidth: fullRoot.meterValueWidth
                                     horizontalAlignment: Text.AlignRight
+                                    elide: Text.ElideRight
                                 }
                             }
 
                             RowLayout {
                                 Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing
                                 PlasmaComponents3.Label {
                                     text: i18n("1w")
-                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 2
+                                    Layout.preferredWidth: fullRoot.meterLabelWidth
                                 }
                                 UsageBar {
                                     Layout.fillWidth: true
@@ -239,30 +337,44 @@ PlasmaExtras.Representation {
                                     fillColor: fullRoot.rootItem.barColor(percent)
                                 }
                                 PlasmaComponents3.Label {
-                                    text: modelData.weekly ? i18n("%1% · %2", modelData.weekly.usedPercent, modelData.weekly.resetsInLabel) : "--"
-                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 8
+                                    text: modelData.weekly
+                                        ? i18n("%1% · %2", modelData.weekly.usedPercent, modelData.weekly.resetsInLabel)
+                                        : "--"
+                                    Layout.preferredWidth: fullRoot.meterValueWidth
                                     horizontalAlignment: Text.AlignRight
+                                    elide: Text.ElideRight
                                 }
                             }
                         }
 
                         RowLayout {
+                            Layout.preferredWidth: fullRoot.actionsColumnWidth
+                            Layout.maximumWidth: fullRoot.actionsColumnWidth
+                            Layout.alignment: Qt.AlignVCenter
                             spacing: Kirigami.Units.smallSpacing
 
                             QQC2.Button {
+                                Layout.fillWidth: true
                                 text: modelData.isActive ? i18n("Active") : i18n("Switch")
                                 enabled: !modelData.isActive && !fullRoot.rootItem.actionInFlight
                                 onClicked: fullRoot.rootItem.activateAccount(modelData.accountKey)
                             }
 
+                            // Kept in layout (not `visible: false`) so the
+                            // Switch/Active button has the same width on
+                            // every row.
                             QQC2.ToolButton {
-                                visible: !modelData.isActive
-                                enabled: !fullRoot.rootItem.actionInFlight
+                                opacity: modelData.isActive ? 0 : 1
+                                enabled: !modelData.isActive && !fullRoot.rootItem.actionInFlight
                                 icon.name: "edit-delete"
                                 display: QQC2.AbstractButton.IconOnly
-                                QQC2.ToolTip.visible: hovered
+                                QQC2.ToolTip.visible: hovered && !modelData.isActive
                                 QQC2.ToolTip.text: i18n("Delete account")
-                                onClicked: fullRoot.rootItem.removeAccount(modelData.accountKey)
+                                onClicked: {
+                                    if (!modelData.isActive) {
+                                        fullRoot.rootItem.removeAccount(modelData.accountKey);
+                                    }
+                                }
                             }
                         }
                     }

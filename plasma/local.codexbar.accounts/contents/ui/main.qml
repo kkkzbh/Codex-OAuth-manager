@@ -224,6 +224,44 @@ PlasmoidItem {
         return account.alias && account.alias.length > 0 ? account.alias : account.email;
     }
 
+    function workspaceName(account) {
+        if (!account || !account.workspaceName) {
+            return "";
+        }
+        return String(account.workspaceName).trim();
+    }
+
+    function isTeamAccount(account) {
+        return !!account && String(account.plan || "").toLowerCase() === "team";
+    }
+
+    function accountWorkspaceText(account) {
+        const name = workspaceName(account);
+        if (!isTeamAccount(account) || name.length === 0) {
+            return "";
+        }
+        return i18n("Workspace: %1", name);
+    }
+
+    function accountSecondaryText(account, includePlan) {
+        if (!account) {
+            return "";
+        }
+        const parts = [];
+        if (account.email && String(account.email).length > 0) {
+            parts.push(String(account.email));
+        }
+        const workspace = accountWorkspaceText(account);
+        if (workspace.length > 0) {
+            parts.push(workspace);
+        }
+        if (includePlan && account.plan && String(account.plan).length > 0) {
+            parts.push(String(account.plan));
+        }
+        parts.push(account.usageSource === "live" ? i18n("Live") : i18n("Cached"));
+        return parts.join(" · ");
+    }
+
     function currentAccountSubtitle() {
         if (actionInFlight) {
             return i18n("Refreshing live limits…");
@@ -309,12 +347,7 @@ PlasmoidItem {
         onTriggered: root.expanded ? root.refreshAll(true) : root.refreshCurrent(true)
     }
 
-    Component.onCompleted: refreshCurrent(true)
-    onExpandedChanged: {
-        if (expanded) {
-            refreshAll(true);
-        }
-    }
+    Component.onCompleted: refreshAll(true)
 
     PlasmaCore.Action {
         id: refreshAction

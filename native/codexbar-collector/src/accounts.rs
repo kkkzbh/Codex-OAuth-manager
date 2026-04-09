@@ -133,6 +133,8 @@ pub struct AccountUsageSnapshot {
     pub user_id: Option<String>,
     pub email: String,
     pub alias: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_name: Option<String>,
     pub plan: String,
     pub auth_mode: String,
     pub is_active: bool,
@@ -244,6 +246,8 @@ struct RegistryAccount {
     #[serde(default)]
     alias: String,
     #[serde(default)]
+    workspace_name: Option<String>,
+    #[serde(default)]
     plan: String,
     #[serde(default)]
     auth_mode: String,
@@ -321,6 +325,17 @@ struct OpenAiAuthClaims {
     chatgpt_user_id: Option<String>,
     #[serde(default)]
     user_id: Option<String>,
+    #[serde(default)]
+    organizations: Vec<OpenAiOrganization>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct OpenAiOrganization {
+    #[serde(default)]
+    is_default: bool,
+    #[serde(default)]
+    title: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -761,6 +776,10 @@ fn sync_current_auth_into_registry(paths: &AccountsPaths, registry: &mut Registr
         .as_ref()
         .and_then(|claims| claims.name.clone())
         .unwrap_or_default();
+    let workspace_name = claims
+        .as_ref()
+        .and_then(|claims| claims.auth.as_ref())
+        .and_then(default_workspace_name);
     let plan = claims
         .as_ref()
         .and_then(|claims| claims.auth.as_ref())
@@ -794,6 +813,10 @@ fn sync_current_auth_into_registry(paths: &AccountsPaths, registry: &mut Registr
             existing.alias = alias.clone();
             changed = true;
         }
+        if existing.workspace_name.as_deref() != workspace_name.as_deref() {
+            existing.workspace_name = workspace_name.clone();
+            changed = true;
+        }
         if existing.plan.is_empty() && !plan.is_empty() {
             existing.plan = plan.clone();
             changed = true;
@@ -809,6 +832,7 @@ fn sync_current_auth_into_registry(paths: &AccountsPaths, registry: &mut Registr
             chatgpt_user_id: Some(user_id.clone()),
             email,
             alias,
+            workspace_name,
             plan,
             auth_mode: auth_file.auth_mode.clone(),
             last_usage: None,
@@ -973,6 +997,7 @@ fn fetch_live_usage_for_account(
             user_id: context.registry.chatgpt_user_id.clone(),
             email,
             alias: context.registry.alias.clone(),
+            workspace_name: context.registry.workspace_name.clone(),
             plan,
             auth_mode: if context.registry.auth_mode.is_empty() {
                 auth_file.auth_mode.clone()
@@ -1072,6 +1097,9 @@ fn build_fallback_snapshot(
         if snapshot.last_usage_at.is_none() {
             snapshot.last_usage_at = Some(snapshot.generated_at.clone());
         }
+        if snapshot.workspace_name.is_none() {
+            snapshot.workspace_name = context.registry.workspace_name.clone();
+        }
         snapshot.error = error.or(snapshot.error);
         return snapshot;
     }
@@ -1107,6 +1135,7 @@ fn build_fallback_snapshot(
         user_id: context.registry.chatgpt_user_id.clone(),
         email: context.registry.email.clone(),
         alias: context.registry.alias.clone(),
+        workspace_name: context.registry.workspace_name.clone(),
         plan: context
             .registry
             .last_usage
@@ -1251,6 +1280,17 @@ fn parse_id_token_claims(id_token: &str) -> Option<IdTokenClaims> {
     serde_json::from_slice(&decoded).ok()
 }
 
+fn default_workspace_name(auth: &OpenAiAuthClaims) -> Option<String> {
+    auth.organizations
+        .iter()
+        .find(|organization| organization.is_default)
+        .or_else(|| auth.organizations.first())
+        .and_then(|organization| organization.title.as_ref())
+        .map(|title| title.trim())
+        .filter(|title| !title.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn default_schema_version() -> u32 {
     3
 }
@@ -1302,6 +1342,7 @@ mod tests {
                         "chatgpt_user_id": "user-a",
                         "email": "a@example.com",
                         "alias": "Alpha",
+                        "workspace_name": "Acme Workspace",
                         "plan": "team",
                         "auth_mode": "chatgpt",
                         "last_usage": {
@@ -1399,6 +1440,7 @@ mod tests {
         let mut registry = read_registry(&paths.registry_path)?;
         registry.accounts[1].email = String::new();
         registry.accounts[1].alias = String::new();
+        registry.accounts[1].workspace_name = None;
         registry.accounts[1].plan = String::new();
         write_registry(&paths.registry_path, &registry)?;
 
@@ -1409,6 +1451,7 @@ mod tests {
         assert_eq!(updated.active_account_key.as_deref(), Some("user-b::acct-2"));
         assert_eq!(updated.accounts[1].email, "beta@example.com");
         assert_eq!(updated.accounts[1].alias, "Beta");
+        assert_eq!(updated.accounts[1].workspace_name, None);
         assert_eq!(updated.accounts[1].plan, "pro");
         Ok(())
     }
@@ -1431,6 +1474,7 @@ mod tests {
                             user_id: Some("user-b".to_string()),
                             email: "b@example.com".to_string(),
                             alias: String::new(),
+                            workspace_name: None,
                             plan: "plus".to_string(),
                             auth_mode: "chatgpt".to_string(),
                             is_active: false,
@@ -1504,6 +1548,7 @@ mod tests {
         assert_eq!(snapshot.status, AccountSnapshotStatus::Stale);
         assert_eq!(snapshot.usage_source, UsageSource::Cache);
         assert_eq!(snapshot.session.as_ref().map(|window| window.used_percent), Some(20));
+        assert_eq!(snapshot.workspace_name.as_deref(), Some("Acme Workspace"));
         Ok(())
     }
 
