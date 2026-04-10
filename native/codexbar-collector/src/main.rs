@@ -34,8 +34,6 @@ struct SnapshotArgs {
     #[arg(long)]
     claude_stats_path: Option<PathBuf>,
     #[arg(long)]
-    antigravity_db_path: Option<PathBuf>,
-    #[arg(long)]
     cache_path: Option<PathBuf>,
     #[arg(long, default_value_t = 15)]
     ttl_seconds: u64,
@@ -159,9 +157,6 @@ fn run() -> anyhow::Result<()> {
             }
             if let Some(path) = args.claude_stats_path {
                 paths.claude_stats_path = path;
-            }
-            if let Some(path) = args.antigravity_db_path {
-                paths.antigravity_db_path = path;
             }
             if let Some(path) = args.cache_path {
                 paths.cache_path = path;

@@ -8,8 +8,8 @@
       }
     ],
     "Category": "Utilities",
-    "Description": "Shows local token totals from Codex, Claude Code, and Antigravity.",
-    "Description[zh_CN]": "显示 Codex、Claude Code 和 Antigravity 的本地 Token 总量。",
+    "Description": "Shows local token totals from Codex and Claude Code.",
+    "Description[zh_CN]": "显示 Codex 和 Claude Code 的本地 Token 总量。",
     "EnabledByDefault": false,
     "FormFactors": [
       "desktop"
