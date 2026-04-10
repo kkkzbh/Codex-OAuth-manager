@@ -28,11 +28,11 @@ PlasmoidItem {
     readonly property int autoSwitchWeeklyThreshold: Plasmoid.configuration.autoSwitchWeeklyThreshold || 5
     readonly property string terminalCommand: Plasmoid.configuration.terminalCommand || "kitty -e {command}"
     readonly property string loginCommand: Plasmoid.configuration.loginCommand || "codex login"
-    readonly property var snapshot: allSnapshot && allSnapshot.accounts && allSnapshot.accounts.length > 0
-        ? allSnapshot
-        : activeSnapshot
+    readonly property int currentRefreshCooldownMs: Math.max(3 * 60 * 1000, refreshIntervalSeconds * 2000)
+    readonly property var snapshot: mergedSnapshotForDisplay(allSnapshot, activeSnapshot)
     readonly property var currentAccount: currentAccountFromSnapshotData(snapshot)
     readonly property string snapshotGeneratedAt: snapshot && snapshot.generatedAt ? String(snapshot.generatedAt) : ""
+    readonly property string currentAccountGeneratedAt: accountTimestamp(currentAccount)
     readonly property int currentAccountSessionPercent: usagePercent(currentAccount, "session")
     readonly property int currentAccountWeeklyPercent: usagePercent(currentAccount, "weekly")
     readonly property string currentAccountSessionLabel: usageLabel(currentAccount, "session")
@@ -44,6 +44,7 @@ PlasmoidItem {
     property string pendingAction: ""
     property int commandInvocationSerial: 0
     property double lastAutoSwitchAtMs: 0
+    property double lastCurrentRefreshAtMs: 0
     property var activeSnapshot: ({
         generatedAt: "",
         status: "error",
@@ -87,7 +88,7 @@ PlasmoidItem {
                     currentAccountSessionPercent,
                     currentAccountWeeklyPercent,
                     currentAccount.usageSource === "live" ? i18n("Live") : i18n("Cached"),
-                    relativeTimestamp(snapshotGeneratedAt));
+                    relativeTimestamp(currentAccountGeneratedAt));
     }
 
     function expandPath(pathValue) {
@@ -150,7 +151,9 @@ PlasmoidItem {
         if (forceRefresh) {
             args.push("--force-refresh");
         }
-        runCommand("snapshot-active", "snapshot", args, true);
+        if (runCommand("snapshot-active", "snapshot", args, true)) {
+            lastCurrentRefreshAtMs = Date.now();
+        }
     }
 
     function refreshAll(forceRefresh, actionName) {
@@ -225,6 +228,10 @@ PlasmoidItem {
         runCommand("auto-switch", "auto-switch", ["--force-refresh"], false);
     }
 
+    function snapshotHasAccounts(snapshotData) {
+        return !!(snapshotData && snapshotData.accounts && snapshotData.accounts.length > 0);
+    }
+
     function parseSnapshot(stdout, activeOnly) {
         try {
             const parsed = JSON.parse(stdout);
@@ -248,6 +255,126 @@ PlasmoidItem {
         return account && account.accountKey ? String(account.accountKey) : "";
     }
 
+    function activeAccountKeyFromSnapshot(snapshotData) {
+        if (snapshotData && snapshotData.activeAccountKey) {
+            return String(snapshotData.activeAccountKey);
+        }
+
+        const accounts = snapshotData && snapshotData.accounts ? snapshotData.accounts : [];
+        for (let index = 0; index < accounts.length; index += 1) {
+            if (accounts[index].isActive) {
+                return accountKey(accounts[index]);
+            }
+        }
+
+        return "";
+    }
+
+    function accountForKey(snapshotData, key) {
+        if (!snapshotData || !snapshotData.accounts || !key) {
+            return null;
+        }
+
+        for (let index = 0; index < snapshotData.accounts.length; index += 1) {
+            if (accountKey(snapshotData.accounts[index]) === key) {
+                return snapshotData.accounts[index];
+            }
+        }
+
+        return null;
+    }
+
+    function timestampMs(value) {
+        if (!value) {
+            return 0;
+        }
+        const parsed = new Date(String(value)).getTime();
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function accountTimestamp(account) {
+        if (!account) {
+            return "";
+        }
+        const generatedAt = account.generatedAt ? String(account.generatedAt) : "";
+        const lastUsageAt = account.lastUsageAt ? String(account.lastUsageAt) : "";
+        return timestampMs(lastUsageAt) >= timestampMs(generatedAt)
+            ? (lastUsageAt || generatedAt)
+            : (generatedAt || lastUsageAt);
+    }
+
+    function preferAccountSnapshot(primary, secondary) {
+        if (!primary) {
+            return secondary;
+        }
+        if (!secondary) {
+            return primary;
+        }
+
+        const primaryScore = timestampMs(accountTimestamp(primary));
+        const secondaryScore = timestampMs(accountTimestamp(secondary));
+        if (secondaryScore > primaryScore) {
+            return secondary;
+        }
+        if (primaryScore > secondaryScore) {
+            return primary;
+        }
+
+        if (primary.usageSource !== secondary.usageSource) {
+            return secondary.usageSource === "live" ? secondary : primary;
+        }
+
+        return primary;
+    }
+
+    function replaceAccountInSnapshot(snapshotData, account) {
+        if (!snapshotHasAccounts(snapshotData) || !account) {
+            return snapshotData;
+        }
+
+        const targetKey = accountKey(account);
+        if (targetKey.length === 0) {
+            return snapshotData;
+        }
+
+        let replaced = false;
+        const mergedAccounts = snapshotData.accounts.map(function(existingAccount) {
+            if (accountKey(existingAccount) !== targetKey) {
+                return existingAccount;
+            }
+            replaced = true;
+            return account;
+        });
+
+        if (!replaced) {
+            return snapshotData;
+        }
+
+        return Object.assign({}, snapshotData, {
+            accounts: mergedAccounts,
+            activeAccountKey: targetKey
+        });
+    }
+
+    function mergedSnapshotForDisplay(allSnapshotData, activeSnapshotData) {
+        const baseSnapshot = snapshotHasAccounts(allSnapshotData)
+            ? allSnapshotData
+            : activeSnapshotData;
+        if (!snapshotHasAccounts(baseSnapshot)) {
+            return baseSnapshot;
+        }
+
+        const activeKey = activeAccountKeyFromSnapshot(baseSnapshot);
+        const preferredCurrent = preferAccountSnapshot(
+            accountForKey(allSnapshotData, activeKey),
+            accountForKey(activeSnapshotData, activeKey)
+        );
+        return replaceAccountInSnapshot(
+            baseSnapshot,
+            preferredCurrent || currentAccountFromSnapshotData(baseSnapshot)
+        );
+    }
+
     function currentAccountFromSnapshotData(snapshotData) {
         const accounts = snapshotData && snapshotData.accounts ? snapshotData.accounts : [];
         const activeAccountKey = snapshotData && snapshotData.activeAccountKey
@@ -266,6 +393,23 @@ PlasmoidItem {
             }
         }
         return accounts.length > 0 ? accounts[0] : null;
+    }
+
+    function shouldRefreshCurrentAccount() {
+        if (actionInFlight || !snapshotHasAccounts(allSnapshot)) {
+            return false;
+        }
+
+        const account = currentAccount;
+        if (!account) {
+            return false;
+        }
+
+        if (account.status === "ok" && account.usageSource === "live") {
+            return false;
+        }
+
+        return Date.now() - lastCurrentRefreshAtMs >= currentRefreshCooldownMs;
     }
 
     function isCurrentAccount(account) {
@@ -389,7 +533,7 @@ PlasmoidItem {
         return i18n("%1 · %2 · %3",
                     currentAccount.plan,
                     currentAccount.usageSource === "live" ? i18n("Live") : i18n("Cached"),
-                    relativeTimestamp(snapshotGeneratedAt));
+                    relativeTimestamp(currentAccountGeneratedAt));
     }
 
     function relativeTimestamp(value) {
@@ -445,6 +589,10 @@ PlasmoidItem {
             if (action === "snapshot-active" || action === "snapshot-all" || action === "snapshot-background") {
                 root.parseSnapshot(stdout, action === "snapshot-active");
                 root.actionInFlight = false;
+                if ((action === "snapshot-all" || action === "snapshot-background") && root.shouldRefreshCurrentAccount()) {
+                    root.refreshCurrent(true);
+                    return;
+                }
                 if (root.autoSwitchEnabled && (action === "snapshot-active" || action === "snapshot-background")) {
                     root.maybeAutoSwitch();
                 }

@@ -49,7 +49,9 @@ impl Default for AccountsPaths {
             registry_path: codex_home.join("accounts").join("registry.json"),
             accounts_dir: codex_home.join("accounts"),
             auth_path: codex_home.join("auth.json"),
-            cache_path: cache_root.join("codexbar").join("accounts-snapshot-v1.json"),
+            cache_path: cache_root
+                .join("codexbar")
+                .join("accounts-snapshot-v1.json"),
             codex_home,
         }
     }
@@ -459,7 +461,11 @@ pub fn load_accounts_snapshot(options: &AccountsSnapshotOptions) -> Result<Accou
         .filter(|account| account.status == AccountSnapshotStatus::Stale)
         .count() as u32;
     let status = if healthy_account_count > 0 {
-        if stale_account_count > 0 || accounts.iter().any(|account| account.status == AccountSnapshotStatus::Error) {
+        if stale_account_count > 0
+            || accounts
+                .iter()
+                .any(|account| account.status == AccountSnapshotStatus::Error)
+        {
             AccountSnapshotStatus::Stale
         } else {
             AccountSnapshotStatus::Ok
@@ -480,7 +486,11 @@ pub fn load_accounts_snapshot(options: &AccountsSnapshotOptions) -> Result<Accou
     })
 }
 
-pub fn activate_account(paths: &AccountsPaths, account_key: &str, now: DateTime<FixedOffset>) -> Result<AccountActionResult> {
+pub fn activate_account(
+    paths: &AccountsPaths,
+    account_key: &str,
+    now: DateTime<FixedOffset>,
+) -> Result<AccountActionResult> {
     let mut registry = read_registry(&paths.registry_path)?;
     let auth_files = discover_auth_files(&paths.accounts_dir)?;
     let registry_account = registry
@@ -507,8 +517,8 @@ pub fn activate_account(paths: &AccountsPaths, account_key: &str, now: DateTime<
             .with_context(|| format!("Failed to backup {}", paths.auth_path.display()))?;
     }
 
-    let auth_payload = fs::read(&auth_path)
-        .with_context(|| format!("Failed to read {}", auth_path.display()))?;
+    let auth_payload =
+        fs::read(&auth_path).with_context(|| format!("Failed to read {}", auth_path.display()))?;
     atomic_write(&paths.auth_path, &auth_payload)?;
 
     registry.active_account_key = Some(account_key.to_string());
@@ -660,22 +670,26 @@ pub fn remove_account(paths: &AccountsPaths, account_key: &str) -> Result<Accoun
     })
 }
 
-pub fn spawn_account_login(terminal_command: Option<&str>, login_command: Option<&str>) -> Result<AccountActionResult> {
+pub fn spawn_account_login(
+    terminal_command: Option<&str>,
+    login_command: Option<&str>,
+) -> Result<AccountActionResult> {
     let login_command = login_command
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("codex login");
-    let shell_command = if let Some(template) = terminal_command.filter(|value| !value.trim().is_empty()) {
-        if template.contains("{command}") {
-            template.replace("{command}", login_command)
+    let shell_command =
+        if let Some(template) = terminal_command.filter(|value| !value.trim().is_empty()) {
+            if template.contains("{command}") {
+                template.replace("{command}", login_command)
+            } else {
+                format!("{template} {login_command}")
+            }
+        } else if let Ok(terminal) = std::env::var("TERMINAL") {
+            format!("{terminal} -e {login_command}")
         } else {
-            format!("{template} {login_command}")
-        }
-    } else if let Ok(terminal) = std::env::var("TERMINAL") {
-        format!("{terminal} -e {login_command}")
-    } else {
-        format!("kitty -e {login_command}")
-    };
+            format!("kitty -e {login_command}")
+        };
 
     Command::new("sh")
         .arg("-lc")
@@ -712,9 +726,19 @@ pub fn auto_switch_account(options: &AutoSwitchOptions) -> Result<AccountActionR
         .find(|account| account.is_active)
         .ok_or_else(|| anyhow!("No active account available"))?;
 
-    let current_session = current.session.as_ref().map(|window| window.used_percent).unwrap_or(0);
-    let current_weekly = current.weekly.as_ref().map(|window| window.used_percent).unwrap_or(0);
-    if current_session < options.threshold_5h_percent && current_weekly < options.threshold_weekly_percent {
+    let current_session = current
+        .session
+        .as_ref()
+        .map(|window| window.used_percent)
+        .unwrap_or(0);
+    let current_weekly = current
+        .weekly
+        .as_ref()
+        .map(|window| window.used_percent)
+        .unwrap_or(0);
+    if current_session < options.threshold_5h_percent
+        && current_weekly < options.threshold_weekly_percent
+    {
         return Ok(AccountActionResult {
             ok: true,
             action: "auto-switch".to_string(),
@@ -742,11 +766,23 @@ pub fn auto_switch_account(options: &AutoSwitchOptions) -> Result<AccountActionR
         .accounts
         .iter()
         .filter(|account| !account.is_active)
-        .filter(|account| account.usage_source == UsageSource::Live && account.status == AccountSnapshotStatus::Ok)
+        .filter(|account| {
+            account.usage_source == UsageSource::Live && account.status == AccountSnapshotStatus::Ok
+        })
         .max_by_key(|account| {
             (
-                100_i16 - account.session.as_ref().map(|window| window.used_percent as i16).unwrap_or(100),
-                100_i16 - account.weekly.as_ref().map(|window| window.used_percent as i16).unwrap_or(100),
+                100_i16
+                    - account
+                        .session
+                        .as_ref()
+                        .map(|window| window.used_percent as i16)
+                        .unwrap_or(100),
+                100_i16
+                    - account
+                        .weekly
+                        .as_ref()
+                        .map(|window| window.used_percent as i16)
+                        .unwrap_or(100),
                 account.generated_at.clone(),
             )
         });
@@ -762,11 +798,33 @@ pub fn auto_switch_account(options: &AutoSwitchOptions) -> Result<AccountActionR
         });
     };
 
-    let candidate_session_left = 100_i16 - candidate.session.as_ref().map(|window| window.used_percent as i16).unwrap_or(100);
-    let candidate_weekly_left = 100_i16 - candidate.weekly.as_ref().map(|window| window.used_percent as i16).unwrap_or(100);
-    let current_session_left = 100_i16 - current.session.as_ref().map(|window| window.used_percent as i16).unwrap_or(100);
-    let current_weekly_left = 100_i16 - current.weekly.as_ref().map(|window| window.used_percent as i16).unwrap_or(100);
-    if (candidate_session_left, candidate_weekly_left) <= (current_session_left, current_weekly_left) {
+    let candidate_session_left = 100_i16
+        - candidate
+            .session
+            .as_ref()
+            .map(|window| window.used_percent as i16)
+            .unwrap_or(100);
+    let candidate_weekly_left = 100_i16
+        - candidate
+            .weekly
+            .as_ref()
+            .map(|window| window.used_percent as i16)
+            .unwrap_or(100);
+    let current_session_left = 100_i16
+        - current
+            .session
+            .as_ref()
+            .map(|window| window.used_percent as i16)
+            .unwrap_or(100);
+    let current_weekly_left = 100_i16
+        - current
+            .weekly
+            .as_ref()
+            .map(|window| window.used_percent as i16)
+            .unwrap_or(100);
+    if (candidate_session_left, candidate_weekly_left)
+        <= (current_session_left, current_weekly_left)
+    {
         return Ok(AccountActionResult {
             ok: true,
             action: "auto-switch".to_string(),
@@ -790,7 +848,8 @@ fn build_http_client(timeout: StdDuration) -> Result<Client> {
 }
 
 fn read_registry(path: &Path) -> Result<RegistryFile> {
-    let content = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
@@ -821,7 +880,9 @@ fn discover_auth_files(accounts_dir: &Path) -> Result<HashMap<String, (PathBuf, 
         return Ok(auth_files);
     }
 
-    for entry in fs::read_dir(accounts_dir).with_context(|| format!("Failed to read {}", accounts_dir.display()))? {
+    for entry in fs::read_dir(accounts_dir)
+        .with_context(|| format!("Failed to read {}", accounts_dir.display()))?
+    {
         let entry = entry?;
         let path = entry.path();
         if !path
@@ -832,9 +893,10 @@ fn discover_auth_files(accounts_dir: &Path) -> Result<HashMap<String, (PathBuf, 
             continue;
         }
 
-        let content = fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-        let auth_file: AuthFile =
-            serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))?;
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let auth_file: AuthFile = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
         if let Some(account_id) = auth_file.tokens.account_id.clone() {
             auth_files.insert(account_id, (path, auth_file));
         }
@@ -843,15 +905,18 @@ fn discover_auth_files(accounts_dir: &Path) -> Result<HashMap<String, (PathBuf, 
     Ok(auth_files)
 }
 
-fn sync_current_auth_into_registry(paths: &AccountsPaths, registry: &mut RegistryFile) -> Result<()> {
+fn sync_current_auth_into_registry(
+    paths: &AccountsPaths,
+    registry: &mut RegistryFile,
+) -> Result<()> {
     if !paths.auth_path.exists() {
         return Ok(());
     }
 
-    let content =
-        fs::read_to_string(&paths.auth_path).with_context(|| format!("Failed to read {}", paths.auth_path.display()))?;
-    let auth_file: AuthFile =
-        serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", paths.auth_path.display()))?;
+    let content = fs::read_to_string(&paths.auth_path)
+        .with_context(|| format!("Failed to read {}", paths.auth_path.display()))?;
+    let auth_file: AuthFile = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", paths.auth_path.display()))?;
     let claims = auth_file
         .tokens
         .id_token
@@ -868,7 +933,11 @@ fn sync_current_auth_into_registry(paths: &AccountsPaths, registry: &mut Registr
     let user_id = claims
         .as_ref()
         .and_then(|claims| claims.auth.as_ref())
-        .and_then(|auth| auth.chatgpt_user_id.clone().or_else(|| auth.user_id.clone()))
+        .and_then(|auth| {
+            auth.chatgpt_user_id
+                .clone()
+                .or_else(|| auth.user_id.clone())
+        })
         .unwrap_or_else(|| account_id.clone());
     let account_key = format!("{user_id}::{account_id}");
     let email = claims
@@ -974,7 +1043,10 @@ fn build_account_contexts(
     registry
         .accounts
         .iter()
-        .filter(|account| !active_only || registry.active_account_key.as_deref() == Some(account.account_key.as_str()))
+        .filter(|account| {
+            !active_only
+                || registry.active_account_key.as_deref() == Some(account.account_key.as_str())
+        })
         .map(|account| {
             let auth_match = account
                 .chatgpt_account_id
@@ -986,7 +1058,8 @@ fn build_account_contexts(
                 auth_file_path: auth_match.as_ref().map(|entry| entry.0.clone()),
                 auth_file: auth_match.map(|entry| entry.1),
                 cached: cache.accounts.get(&account.account_key).cloned(),
-                is_active: registry.active_account_key.as_deref() == Some(account.account_key.as_str()),
+                is_active: registry.active_account_key.as_deref()
+                    == Some(account.account_key.as_str()),
             }
         })
         .collect()
@@ -1007,12 +1080,21 @@ fn resolve_account_snapshot(
 
     if !options.force_refresh && cache_is_fresh {
         let snapshot = normalize_snapshot_from_cache(&context, cache_entry.clone(), options);
-        return Ok(FetchResult { snapshot, cache_entry });
+        return Ok(FetchResult {
+            snapshot,
+            cache_entry,
+        });
     }
 
     if can_retry_live {
         if let Some(auth_file) = context.auth_file.clone() {
-            match fetch_live_usage_for_account(client, &context, auth_file, options.timeout, options.now) {
+            match fetch_live_usage_for_account(
+                client,
+                &context,
+                auth_file,
+                options.timeout,
+                options.now,
+            ) {
                 Ok((snapshot, auth_file)) => {
                     if let Some(auth_path) = context.auth_file_path.as_ref() {
                         let bytes = serde_json::to_vec_pretty(&auth_file)?;
@@ -1030,15 +1112,25 @@ fn resolve_account_snapshot(
                     });
                 }
                 Err(error) => {
-                    let fallback_snapshot =
-                        build_fallback_snapshot(&context, cache_entry.clone(), options, Some(error.to_string()));
-                    let failure_count = cache_entry.as_ref().map(|entry| entry.failure_count).unwrap_or(0) + 1;
-                    let next_retry_at = options.now + Duration::seconds(backoff_seconds(failure_count));
+                    let fallback_snapshot = build_fallback_snapshot(
+                        &context,
+                        cache_entry.clone(),
+                        options,
+                        Some(format_error_chain(&error)),
+                    );
+                    let failure_count = cache_entry
+                        .as_ref()
+                        .map(|entry| entry.failure_count)
+                        .unwrap_or(0)
+                        + 1;
+                    let next_retry_at =
+                        options.now + Duration::seconds(backoff_seconds(failure_count));
                     let updated_cache = CachedAccountEntry {
                         snapshot: fallback_snapshot.clone(),
                         failure_count,
                         next_retry_at: Some(next_retry_at.to_rfc3339()),
-                        last_live_success_at: cache_entry.and_then(|entry| entry.last_live_success_at),
+                        last_live_success_at: cache_entry
+                            .and_then(|entry| entry.last_live_success_at),
                     };
                     return Ok(FetchResult {
                         snapshot: fallback_snapshot,
@@ -1050,7 +1142,10 @@ fn resolve_account_snapshot(
     }
 
     let snapshot = build_fallback_snapshot(&context, cache_entry.clone(), options, None);
-    Ok(FetchResult { snapshot, cache_entry })
+    Ok(FetchResult {
+        snapshot,
+        cache_entry,
+    })
 }
 
 fn fetch_live_usage_for_account(
@@ -1076,7 +1171,10 @@ fn fetch_live_usage_for_account(
         .rate_limit
         .ok_or_else(|| anyhow!("Usage response is missing rate_limit"))?;
 
-    let session = rate_limit.primary_window.as_ref().map(|window| live_window_to_snapshot(window, now));
+    let session = rate_limit
+        .primary_window
+        .as_ref()
+        .map(|window| live_window_to_snapshot(window, now));
     let weekly = rate_limit
         .secondary_window
         .as_ref()
@@ -1087,10 +1185,18 @@ fn fetch_live_usage_for_account(
     }
 
     let generated_at = now.to_rfc3339();
-    let email = payload.email.unwrap_or_else(|| context.registry.email.clone());
+    let email = payload
+        .email
+        .unwrap_or_else(|| context.registry.email.clone());
     let plan = payload
         .plan_type
-        .or_else(|| context.registry.last_usage.as_ref().and_then(|usage| usage.plan_type.clone()))
+        .or_else(|| {
+            context
+                .registry
+                .last_usage
+                .as_ref()
+                .and_then(|usage| usage.plan_type.clone())
+        })
         .unwrap_or_else(|| context.registry.plan.clone());
 
     Ok((
@@ -1121,7 +1227,10 @@ fn fetch_live_usage_for_account(
     ))
 }
 
-fn fetch_usage_with_access_token(client: &Client, auth_file: &AuthFile) -> Result<reqwest::blocking::Response> {
+fn fetch_usage_with_access_token(
+    client: &Client,
+    auth_file: &AuthFile,
+) -> Result<reqwest::blocking::Response> {
     let access_token = auth_file
         .tokens
         .access_token
@@ -1155,7 +1264,9 @@ fn refresh_auth_tokens(client: &Client, auth_file: &mut AuthFile) -> Result<()> 
     if !response.status().is_success() {
         bail!("Token refresh failed with {}", response.status());
     }
-    let refreshed: RefreshResponse = response.json().context("Failed to decode refreshed token response")?;
+    let refreshed: RefreshResponse = response
+        .json()
+        .context("Failed to decode refreshed token response")?;
     auth_file.tokens.access_token = Some(refreshed.access_token);
     if let Some(refresh_token) = refreshed.refresh_token {
         auth_file.tokens.refresh_token = Some(refresh_token);
@@ -1250,7 +1361,9 @@ fn build_fallback_snapshot(
         is_reachable: context.auth_file.is_some(),
         status,
         usage_source: UsageSource::Cache,
-        generated_at: last_usage_at.clone().unwrap_or_else(|| options.now.to_rfc3339()),
+        generated_at: last_usage_at
+            .clone()
+            .unwrap_or_else(|| options.now.to_rfc3339()),
         last_usage_at,
         session,
         weekly,
@@ -1258,7 +1371,11 @@ fn build_fallback_snapshot(
     }
 }
 
-fn can_attempt_live(cache_entry: Option<&CachedAccountEntry>, now: DateTime<FixedOffset>, force_refresh: bool) -> bool {
+fn can_attempt_live(
+    cache_entry: Option<&CachedAccountEntry>,
+    now: DateTime<FixedOffset>,
+    force_refresh: bool,
+) -> bool {
     if force_refresh {
         return true;
     }
@@ -1271,7 +1388,10 @@ fn can_attempt_live(cache_entry: Option<&CachedAccountEntry>, now: DateTime<Fixe
     now >= next_retry_at
 }
 
-fn account_sort_key(account: &AccountUsageSnapshot, other: &AccountUsageSnapshot) -> std::cmp::Ordering {
+fn account_sort_key(
+    account: &AccountUsageSnapshot,
+    other: &AccountUsageSnapshot,
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     if account.is_active != other.is_active {
         return other.is_active.cmp(&account.is_active);
@@ -1284,14 +1404,34 @@ fn account_sort_key(account: &AccountUsageSnapshot, other: &AccountUsageSnapshot
         };
         return rank(other.status).cmp(&rank(account.status));
     }
-    let account_session_left = 100_i16 - account.session.as_ref().map(|window| window.used_percent as i16).unwrap_or(100);
-    let other_session_left = 100_i16 - other.session.as_ref().map(|window| window.used_percent as i16).unwrap_or(100);
+    let account_session_left = 100_i16
+        - account
+            .session
+            .as_ref()
+            .map(|window| window.used_percent as i16)
+            .unwrap_or(100);
+    let other_session_left = 100_i16
+        - other
+            .session
+            .as_ref()
+            .map(|window| window.used_percent as i16)
+            .unwrap_or(100);
     match other_session_left.cmp(&account_session_left) {
         Ordering::Equal => {}
         ordering => return ordering,
     }
-    let account_weekly_left = 100_i16 - account.weekly.as_ref().map(|window| window.used_percent as i16).unwrap_or(100);
-    let other_weekly_left = 100_i16 - other.weekly.as_ref().map(|window| window.used_percent as i16).unwrap_or(100);
+    let account_weekly_left = 100_i16
+        - account
+            .weekly
+            .as_ref()
+            .map(|window| window.used_percent as i16)
+            .unwrap_or(100);
+    let other_weekly_left = 100_i16
+        - other
+            .weekly
+            .as_ref()
+            .map(|window| window.used_percent as i16)
+            .unwrap_or(100);
     match other_weekly_left.cmp(&account_weekly_left) {
         Ordering::Equal => {}
         ordering => return ordering,
@@ -1313,7 +1453,10 @@ fn live_window_to_snapshot(window: &LiveWindow, now: DateTime<FixedOffset>) -> U
     }
 }
 
-fn registry_window_to_snapshot(window: &RegistryWindow, now: DateTime<FixedOffset>) -> UsageWindowSnapshot {
+fn registry_window_to_snapshot(
+    window: &RegistryWindow,
+    now: DateTime<FixedOffset>,
+) -> UsageWindowSnapshot {
     let reset_at = now
         .timezone()
         .timestamp_opt(window.resets_at, 0)
@@ -1346,7 +1489,8 @@ fn parse_datetime(value: &str) -> Option<DateTime<FixedOffset>> {
 }
 
 fn read_accounts_cache(path: &Path) -> Result<AccountsCacheEnvelope> {
-    let content = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
@@ -1362,7 +1506,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::create_dir_all(parent)?;
     let temp_path = parent.join(format!(
         ".{}.tmp",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("write")
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("write")
     ));
     {
         let mut file = fs::File::create(&temp_path)
@@ -1404,6 +1550,14 @@ fn backoff_seconds(failure_count: u32) -> i64 {
     seconds.min(MAX_BACKOFF_SECONDS)
 }
 
+fn format_error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1419,7 +1573,11 @@ mod tests {
             registry_path: codex_home.join("accounts").join("registry.json"),
             accounts_dir: codex_home.join("accounts"),
             auth_path: codex_home.join("auth.json"),
-            cache_path: root.path().join(".cache").join("codexbar").join("accounts-snapshot-v1.json"),
+            cache_path: root
+                .path()
+                .join(".cache")
+                .join("codexbar")
+                .join("accounts-snapshot-v1.json"),
             codex_home,
         }
     }
@@ -1514,7 +1672,10 @@ mod tests {
         activate_account(&paths, "user-b::acct-2", test_now())?;
 
         let registry = read_registry(&paths.registry_path)?;
-        assert_eq!(registry.active_account_key.as_deref(), Some("user-b::acct-2"));
+        assert_eq!(
+            registry.active_account_key.as_deref(),
+            Some("user-b::acct-2")
+        );
 
         let auth: AuthFile = serde_json::from_str(&fs::read_to_string(&paths.auth_path)?)?;
         assert_eq!(auth.tokens.account_id.as_deref(), Some("acct-2"));
@@ -1551,7 +1712,10 @@ mod tests {
         sync_current_auth_into_registry(&paths, &mut registry)?;
 
         let updated = read_registry(&paths.registry_path)?;
-        assert_eq!(updated.active_account_key.as_deref(), Some("user-b::acct-2"));
+        assert_eq!(
+            updated.active_account_key.as_deref(),
+            Some("user-b::acct-2")
+        );
         assert_eq!(updated.accounts[1].email, "beta@example.com");
         assert_eq!(updated.accounts[1].alias, "Beta");
         assert_eq!(updated.accounts[1].workspace_name, None);
@@ -1622,7 +1786,11 @@ mod tests {
         let paths = test_paths(&root);
 
         let error = remove_account(&paths, "user-a::acct-1").unwrap_err();
-        assert!(error.to_string().contains("Cannot remove the active account"));
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot remove the active account")
+        );
         Ok(())
     }
 
@@ -1650,8 +1818,12 @@ mod tests {
         );
         assert_eq!(snapshot.status, AccountSnapshotStatus::Stale);
         assert_eq!(snapshot.usage_source, UsageSource::Cache);
-        assert_eq!(snapshot.session.as_ref().map(|window| window.used_percent), Some(20));
+        assert_eq!(
+            snapshot.session.as_ref().map(|window| window.used_percent),
+            Some(20)
+        );
         assert_eq!(snapshot.workspace_name.as_deref(), Some("Acme Workspace"));
+        assert_eq!(snapshot.error.as_deref(), Some("network error"));
         Ok(())
     }
 
@@ -1661,5 +1833,17 @@ mod tests {
         assert_eq!(backoff_seconds(2), 60);
         assert_eq!(backoff_seconds(6), 960.min(MAX_BACKOFF_SECONDS));
         assert_eq!(backoff_seconds(10), MAX_BACKOFF_SECONDS);
+    }
+
+    #[test]
+    fn format_error_chain_preserves_nested_context() {
+        let error = anyhow!("connection reset")
+            .context("TLS handshake failed")
+            .context("Failed to query usage endpoint");
+
+        assert_eq!(
+            format_error_chain(&error),
+            "Failed to query usage endpoint: TLS handshake failed: connection reset"
+        );
     }
 }
