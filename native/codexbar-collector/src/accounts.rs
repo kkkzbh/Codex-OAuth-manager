@@ -1156,10 +1156,11 @@ fn fetch_live_usage_for_account(
     now: DateTime<FixedOffset>,
 ) -> Result<(AccountUsageSnapshot, AuthFile)> {
     let _ = timeout;
-    let mut response = fetch_usage_with_access_token(client, &auth_file)?;
+    let account_id = context.registry.chatgpt_account_id.as_deref();
+    let mut response = fetch_usage_with_access_token(client, &auth_file, account_id)?;
     if response.status() == StatusCode::UNAUTHORIZED {
         refresh_auth_tokens(client, &mut auth_file)?;
-        response = fetch_usage_with_access_token(client, &auth_file)?;
+        response = fetch_usage_with_access_token(client, &auth_file, account_id)?;
     }
 
     if !response.status().is_success() {
@@ -1230,16 +1231,21 @@ fn fetch_live_usage_for_account(
 fn fetch_usage_with_access_token(
     client: &Client,
     auth_file: &AuthFile,
+    chatgpt_account_id: Option<&str>,
 ) -> Result<reqwest::blocking::Response> {
     let access_token = auth_file
         .tokens
         .access_token
         .as_deref()
         .ok_or_else(|| anyhow!("Auth file is missing access_token"))?;
-    client
+    let mut request = client
         .get(USAGE_ENDPOINT)
         .bearer_auth(access_token)
-        .header("Accept", "application/json")
+        .header("Accept", "application/json");
+    if let Some(id) = chatgpt_account_id {
+        request = request.header("chatgpt-account-id", id);
+    }
+    request
         .send()
         .context("Failed to query usage endpoint")
 }
