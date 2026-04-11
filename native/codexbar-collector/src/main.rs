@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use codexbar_collector::accounts::{
-    AccountsPaths, AccountsSnapshotOptions, AutoSwitchOptions, activate_account, auto_switch_account,
-    load_accounts_snapshot, remove_account, spawn_account_login, warmup_account,
+    AccountsPaths, AccountsSnapshotOptions, AutoSwitchOptions, activate_account,
+    auto_switch_account, load_accounts_snapshot, remove_account, spawn_account_login,
+    warmup_account,
 };
 use codexbar_collector::{BuildPaths, SnapshotOptions, load_snapshot};
 
@@ -53,7 +54,7 @@ struct AccountsSnapshotArgs {
     soft_ttl_seconds: u64,
     #[arg(long, default_value_t = 900)]
     hard_ttl_seconds: u64,
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 12)]
     timeout_seconds: u64,
     #[arg(long, default_value_t = 4)]
     concurrency: usize,
@@ -61,6 +62,8 @@ struct AccountsSnapshotArgs {
     force_refresh: bool,
     #[arg(long)]
     active_only: bool,
+    #[arg(long)]
+    account_key: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -120,7 +123,7 @@ struct AccountAutoSwitchArgs {
     soft_ttl_seconds: u64,
     #[arg(long, default_value_t = 900)]
     hard_ttl_seconds: u64,
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 12)]
     timeout_seconds: u64,
     #[arg(long, default_value_t = 4)]
     concurrency: usize,
@@ -195,6 +198,7 @@ fn run() -> anyhow::Result<()> {
                 timeout: Duration::from_secs(args.timeout_seconds),
                 force_refresh: args.force_refresh,
                 active_only: args.active_only,
+                account_key: args.account_key,
                 concurrency: args.concurrency,
             })?;
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -202,7 +206,11 @@ fn run() -> anyhow::Result<()> {
         Command::Account(args) => match args.command {
             AccountCommand::Activate(args) => {
                 let paths = account_paths_from_codex_home(args.codex_home);
-                let result = activate_account(&paths, &args.account_key, chrono::Local::now().fixed_offset())?;
+                let result = activate_account(
+                    &paths,
+                    &args.account_key,
+                    chrono::Local::now().fixed_offset(),
+                )?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
             AccountCommand::Remove(args) => {
@@ -211,7 +219,8 @@ fn run() -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
             AccountCommand::Login(args) => {
-                let result = spawn_account_login(args.terminal.as_deref(), args.command.as_deref())?;
+                let result =
+                    spawn_account_login(args.terminal.as_deref(), args.command.as_deref())?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
             AccountCommand::Warmup(args) => {

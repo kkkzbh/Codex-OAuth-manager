@@ -19,7 +19,7 @@ QQC2.Control {
     readonly property real identityColumnWidth: Kirigami.Units.gridUnit * 11
     readonly property real meterLabelWidth: Kirigami.Units.gridUnit * 2
     readonly property real meterValueWidth: Kirigami.Units.gridUnit * 7.5
-    readonly property real actionsColumnWidth: Kirigami.Units.gridUnit * 9
+    readonly property real actionsColumnWidth: Kirigami.Units.gridUnit * 11.5
     readonly property real accountRowSpacing: Kirigami.Units.smallSpacing
     readonly property real accountRowEstimatedHeight: Kirigami.Units.gridUnit * 3.6
 
@@ -357,6 +357,15 @@ QQC2.Control {
                                 onClicked: fullRoot.rootItem.activateAccount(modelData.accountKey)
                             }
 
+                            QQC2.ToolButton {
+                                enabled: !fullRoot.rootItem.actionInFlight
+                                icon.name: "view-refresh"
+                                display: QQC2.AbstractButton.IconOnly
+                                QQC2.ToolTip.visible: hovered
+                                QQC2.ToolTip.text: i18n("Refresh this account")
+                                onClicked: fullRoot.rootItem.refreshAccount(modelData.accountKey)
+                            }
+
                             // Kept in layout (not `visible: false`) so the
                             // Switch/Active button has the same width on
                             // every row. Sends a tiny Responses-API request
@@ -405,12 +414,7 @@ QQC2.Control {
 
             PlasmaComponents3.Label {
                 Layout.fillWidth: true
-                text: fullRoot.rootItem.actionInFlight
-                    ? i18n("Refreshing all account limits…")
-                    : fullRoot.rootItem.snapshot.status === "stale"
-                    ? i18n("Some accounts are using cached data · %1",
-                           fullRoot.rootItem.relativeTimestamp(fullRoot.rootItem.snapshotGeneratedAt))
-                    : fullRoot.rootItem.relativeTimestamp(fullRoot.rootItem.snapshotGeneratedAt)
+                text: fullRoot.rootItem.footerStatusText()
                 opacity: 0.6
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                 elide: Text.ElideRight

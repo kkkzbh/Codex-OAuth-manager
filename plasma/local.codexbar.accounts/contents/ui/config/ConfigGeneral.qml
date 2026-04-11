@@ -101,7 +101,7 @@ Kirigami.FormLayout {
         onValueModified: page.cfg_liveFetchTimeoutSeconds = value
         textFromValue: function(value) { return i18n("%1 seconds", value) }
         valueFromText: function(text) {
-            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_liveFetchTimeoutSeconds || 8
+            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_liveFetchTimeoutSeconds || 12
         }
     }
 

@@ -22,7 +22,7 @@ PlasmoidItem {
     readonly property int warnPercent: Plasmoid.configuration.warnPercent || 75
     readonly property int dangerPercent: Plasmoid.configuration.dangerPercent || 90
     readonly property int liveFetchConcurrency: Math.max(1, Plasmoid.configuration.liveFetchConcurrency || 4)
-    readonly property int liveFetchTimeoutSeconds: Math.max(3, Plasmoid.configuration.liveFetchTimeoutSeconds || 8)
+    readonly property int liveFetchTimeoutSeconds: Math.max(3, Plasmoid.configuration.liveFetchTimeoutSeconds || 12)
     readonly property bool autoSwitchEnabled: Plasmoid.configuration.enableAutoSwitch || false
     readonly property int autoSwitch5hThreshold: Plasmoid.configuration.autoSwitch5hThreshold || 10
     readonly property int autoSwitchWeeklyThreshold: Plasmoid.configuration.autoSwitchWeeklyThreshold || 5
@@ -31,6 +31,14 @@ PlasmoidItem {
     readonly property int currentRefreshCooldownMs: Math.max(3 * 60 * 1000, refreshIntervalSeconds * 2000)
     readonly property var snapshot: mergedSnapshotForDisplay(allSnapshot, activeSnapshot)
     readonly property var currentAccount: currentAccountFromSnapshotData(snapshot)
+    readonly property int knownAccountCount: Math.max(
+        1,
+        Number(snapshot && snapshot.accountCount ? snapshot.accountCount : 0)
+        || Number(allSnapshot && allSnapshot.accountCount ? allSnapshot.accountCount : 0)
+        || Number(snapshot && snapshot.accounts ? snapshot.accounts.length : 0)
+        || Number(allSnapshot && allSnapshot.accounts ? allSnapshot.accounts.length : 0)
+        || 1
+    )
     readonly property string snapshotGeneratedAt: snapshot && snapshot.generatedAt ? String(snapshot.generatedAt) : ""
     readonly property string currentAccountGeneratedAt: accountTimestamp(currentAccount)
     readonly property int currentAccountSessionPercent: usagePercent(currentAccount, "session")
@@ -42,9 +50,9 @@ PlasmoidItem {
     property bool actionInFlight: false
     property string errorMessage: ""
     property string pendingAction: ""
+    property string pendingSnapshotAccountKey: ""
     property int commandInvocationSerial: 0
     property double lastAutoSwitchAtMs: 0
-    property double lastCurrentRefreshAtMs: 0
     property var activeSnapshot: ({
         generatedAt: "",
         status: "error",
@@ -126,11 +134,46 @@ PlasmoidItem {
             + args;
     }
 
-    function runCommand(actionName, commandName, extraArgs, expectSnapshot) {
+    function fullRefreshTimeoutSeconds() {
+        const baselineAccountCount = Math.max(knownAccountCount, liveFetchConcurrency * 3, 12);
+        return Math.ceil(Math.max(baselineAccountCount, 1) / liveFetchConcurrency) * liveFetchTimeoutSeconds + 5;
+    }
+
+    function isFullSnapshotAction(actionName) {
+        return actionName === "snapshot-all"
+            || actionName === "snapshot-background"
+            || actionName === "snapshot-resync";
+    }
+
+    function requestTimeoutMs(actionName) {
+        if (isFullSnapshotAction(actionName)) {
+            return Math.max(5000, fullRefreshTimeoutSeconds() * 1000);
+        }
+        if (actionName === "snapshot-account" || actionName === "snapshot-active") {
+            return Math.max(5000, (liveFetchTimeoutSeconds + 5) * 1000);
+        }
+        return 0;
+    }
+
+    function timeoutMessage(actionName) {
+        const seconds = Math.max(1, Math.round(requestTimeoutMs(actionName) / 1000));
+        return i18n("Refreshing account limits timed out after %1s", seconds);
+    }
+
+    function clearRequestState() {
+        pendingAction = "";
+        pendingSnapshotAccountKey = "";
+        actionInFlight = false;
+        requestWatchdog.stop();
+    }
+
+    function runCommand(actionName, commandName, extraArgs, expectSnapshot, snapshotAccountKey) {
         if (actionInFlight) {
             return false;
         }
+        errorMessage = "";
         pendingAction = actionName;
+        pendingSnapshotAccountKey = snapshotAccountKey ? String(snapshotAccountKey) : "";
         actionInFlight = true;
         if (expectSnapshot) {
             isLoading = true;
@@ -143,17 +186,13 @@ PlasmoidItem {
             + buildBridgeCommand(commandName, extraArgs);
         executable.connectedSources = [];
         executable.connectedSources = ["sh -lc " + shellQuote(invocationCommand)];
+        if (expectSnapshot) {
+            requestWatchdog.interval = requestTimeoutMs(actionName);
+            requestWatchdog.restart();
+        } else {
+            requestWatchdog.stop();
+        }
         return true;
-    }
-
-    function refreshCurrent(forceRefresh) {
-        const args = ["--active-only"];
-        if (forceRefresh) {
-            args.push("--force-refresh");
-        }
-        if (runCommand("snapshot-active", "snapshot", args, true)) {
-            lastCurrentRefreshAtMs = Date.now();
-        }
     }
 
     function refreshAll(forceRefresh, actionName) {
@@ -161,7 +200,17 @@ PlasmoidItem {
         if (forceRefresh) {
             args.push("--force-refresh");
         }
-        runCommand(actionName || "snapshot-all", "snapshot", args, true);
+        return runCommand(actionName || "snapshot-all", "snapshot", args, true, "");
+    }
+
+    function refreshAccount(accountKey) {
+        return runCommand(
+            "snapshot-account",
+            "snapshot",
+            ["--force-refresh", "--account-key", shellQuote(accountKey)],
+            true,
+            accountKey
+        );
     }
 
     function refreshBackground() {
@@ -171,7 +220,7 @@ PlasmoidItem {
     }
 
     function addAccount() {
-        runCommand("login", "login", [], false);
+        runCommand("login", "login", [], false, "");
     }
 
     function activateAccount(accountKey) {
@@ -179,7 +228,7 @@ PlasmoidItem {
         // moment the user clicks Switch, instead of waiting for the activate
         // command + follow-up snapshot to round-trip through the collector.
         applyOptimisticActive(accountKey);
-        runCommand("activate", "activate", ["--account-key", shellQuote(accountKey)], false);
+        runCommand("activate", "activate", ["--account-key", shellQuote(accountKey)], false, "");
     }
 
     function applyOptimisticActive(accountKey) {
@@ -205,7 +254,7 @@ PlasmoidItem {
     }
 
     function removeAccount(accountKey) {
-        runCommand("remove", "remove", ["--account-key", shellQuote(accountKey)], false);
+        runCommand("remove", "remove", ["--account-key", shellQuote(accountKey)], false, "");
     }
 
     function warmupAccount(accountKey) {
@@ -213,7 +262,7 @@ PlasmoidItem {
         // its rolling 5h rate-limit window. The default post-action handler
         // (`onNewData`) then runs `refreshAll(true)`, which re-fetches usage
         // for every account and surfaces the new 5h bar value.
-        runCommand("warmup", "warmup", ["--account-key", shellQuote(accountKey)], false);
+        runCommand("warmup", "warmup", ["--account-key", shellQuote(accountKey)], false, "");
     }
 
     function maybeAutoSwitch() {
@@ -225,30 +274,40 @@ PlasmoidItem {
             return;
         }
         lastAutoSwitchAtMs = now;
-        runCommand("auto-switch", "auto-switch", ["--force-refresh"], false);
+        runCommand("auto-switch", "auto-switch", ["--force-refresh"], false, "");
     }
 
     function snapshotHasAccounts(snapshotData) {
         return !!(snapshotData && snapshotData.accounts && snapshotData.accounts.length > 0);
     }
 
-    function parseSnapshot(stdout, activeOnly) {
+    function parseSnapshotPayload(stdout) {
         try {
             const parsed = JSON.parse(stdout);
             if (!parsed.accounts) parsed.accounts = [];
             logActiveAccountDiagnostics(parsed);
-            if (activeOnly) {
-                activeSnapshot = parsed;
-            } else {
-                allSnapshot = parsed;
-            }
-            errorMessage = parsed.error ? String(parsed.error) : "";
-            isLoading = false;
+            return parsed;
         } catch (error) {
             console.log("[codexbar-accounts] invalid payload", stdout);
             errorMessage = i18n("Invalid collector payload");
             isLoading = false;
+            return null;
         }
+    }
+
+    function parseSnapshot(stdout, activeOnly) {
+        const parsed = parseSnapshotPayload(stdout);
+        if (!parsed) {
+            return null;
+        }
+        if (activeOnly) {
+            activeSnapshot = parsed;
+        } else {
+            allSnapshot = parsed;
+        }
+        errorMessage = parsed.error ? String(parsed.error) : "";
+        isLoading = false;
+        return parsed;
     }
 
     function accountKey(account) {
@@ -327,7 +386,49 @@ PlasmoidItem {
         return primary;
     }
 
-    function replaceAccountInSnapshot(snapshotData, account) {
+    function withSnapshotSummary(snapshotData, generatedAt, errorText) {
+        const accounts = snapshotData && snapshotData.accounts ? snapshotData.accounts : [];
+        let healthyAccountCount = 0;
+        let staleAccountCount = 0;
+        let hasErrorAccount = false;
+
+        for (let index = 0; index < accounts.length; index += 1) {
+            const status = String(accounts[index].status || "error");
+            if (status === "ok") {
+                healthyAccountCount += 1;
+            } else if (status === "stale") {
+                staleAccountCount += 1;
+            } else {
+                hasErrorAccount = true;
+            }
+        }
+
+        let status = snapshotData && snapshotData.status ? String(snapshotData.status) : "ok";
+        if (accounts.length > 0) {
+            status = healthyAccountCount > 0
+                ? (staleAccountCount > 0 || hasErrorAccount ? "stale" : "ok")
+                : "error";
+        }
+
+        const nextError = typeof errorText === "string"
+            ? (errorText.length > 0 ? errorText : null)
+            : (snapshotData && snapshotData.error ? snapshotData.error : null);
+        const nextGeneratedAt = generatedAt && String(generatedAt).length > 0
+            ? String(generatedAt)
+            : (snapshotData && snapshotData.generatedAt ? String(snapshotData.generatedAt) : "");
+
+        return Object.assign({}, snapshotData, {
+            generatedAt: nextGeneratedAt,
+            status: status,
+            error: nextError,
+            activeAccountKey: activeAccountKeyFromSnapshot(snapshotData),
+            accountCount: accounts.length,
+            healthyAccountCount: healthyAccountCount,
+            staleAccountCount: staleAccountCount
+        });
+    }
+
+    function replaceAccountInSnapshot(snapshotData, account, generatedAt, errorText) {
         if (!snapshotHasAccounts(snapshotData) || !account) {
             return snapshotData;
         }
@@ -350,10 +451,61 @@ PlasmoidItem {
             return snapshotData;
         }
 
-        return Object.assign({}, snapshotData, {
-            accounts: mergedAccounts,
-            activeAccountKey: targetKey
-        });
+        return withSnapshotSummary(Object.assign({}, snapshotData, {
+            accounts: mergedAccounts
+        }), generatedAt, errorText);
+    }
+
+    function parseSingleAccountSnapshot(stdout, expectedAccountKey) {
+        const parsed = parseSnapshotPayload(stdout);
+        if (!parsed) {
+            return null;
+        }
+
+        const account = parsed.accounts.length > 0 ? parsed.accounts[0] : null;
+        const targetKey = expectedAccountKey && expectedAccountKey.length > 0
+            ? String(expectedAccountKey)
+            : accountKey(account);
+        const currentKey = accountKey(currentAccount);
+        const parsedError = parsed.error ? String(parsed.error) : "";
+        const parsedGeneratedAt = parsed.generatedAt ? String(parsed.generatedAt) : "";
+
+        if (!account || targetKey.length === 0) {
+            errorMessage = parsedError.length > 0 ? parsedError : i18n("No account data available");
+            isLoading = false;
+            return null;
+        }
+
+        if (accountKey(account) !== targetKey) {
+            console.warn("[codexbar-accounts] refreshed account key `" + accountKey(account)
+                + "` did not match requested `" + targetKey + "`");
+        }
+
+        if (!accountForKey(snapshot, targetKey)) {
+            console.warn("[codexbar-accounts] refreshed account `" + targetKey
+                + "` was not found in current snapshot; scheduling resync");
+            errorMessage = parsedError;
+            isLoading = false;
+            refreshAll(false, "snapshot-resync");
+            return parsed;
+        }
+
+        if (accountForKey(allSnapshot, targetKey)) {
+            allSnapshot = replaceAccountInSnapshot(allSnapshot, account, parsedGeneratedAt, parsedError);
+        }
+
+        if (targetKey === currentKey && accountForKey(activeSnapshot, targetKey)) {
+            activeSnapshot = replaceAccountInSnapshot(activeSnapshot, account, parsedGeneratedAt, parsedError);
+        }
+
+        errorMessage = parsedError;
+        isLoading = false;
+
+        if (!accountForKey(allSnapshot, targetKey) && snapshotHasAccounts(allSnapshot)) {
+            refreshAll(false, "snapshot-resync");
+        }
+
+        return parsed;
     }
 
     function mergedSnapshotForDisplay(allSnapshotData, activeSnapshotData) {
@@ -393,23 +545,6 @@ PlasmoidItem {
             }
         }
         return accounts.length > 0 ? accounts[0] : null;
-    }
-
-    function shouldRefreshCurrentAccount() {
-        if (actionInFlight || !snapshotHasAccounts(allSnapshot)) {
-            return false;
-        }
-
-        const account = currentAccount;
-        if (!account) {
-            return false;
-        }
-
-        if (account.status === "ok" && account.usageSource === "live") {
-            return false;
-        }
-
-        return Date.now() - lastCurrentRefreshAtMs >= currentRefreshCooldownMs;
     }
 
     function isCurrentAccount(account) {
@@ -523,17 +658,70 @@ PlasmoidItem {
         return parts.join(" · ");
     }
 
+    function accountErrorText(account) {
+        return account && account.error ? String(account.error).trim() : "";
+    }
+
+    function isLiveAccountSnapshot(account) {
+        return !!account && account.status === "ok" && account.usageSource === "live";
+    }
+
+    function isCachedAccountSnapshot(account) {
+        return !!account && account.usageSource === "cache" && !isLiveAccountSnapshot(account);
+    }
+
+    function joinSummaryParts(parts) {
+        return parts.filter(function(part) {
+            return String(part || "").length > 0;
+        }).join(" · ");
+    }
+
+    function currentAccountStatusText() {
+        if (!currentAccount) {
+            return i18n("No account data available");
+        }
+        if (isLiveAccountSnapshot(currentAccount)) {
+            return joinSummaryParts([
+                i18n("Live"),
+                relativeTimestamp(currentAccountGeneratedAt)
+            ]);
+        }
+        const errorText = accountErrorText(currentAccount);
+        return joinSummaryParts([
+            i18n("Showing cached data from %1", relativeTimestamp(currentAccountGeneratedAt)),
+            errorText
+        ]);
+    }
+
     function currentAccountSubtitle() {
         if (actionInFlight) {
-            return i18n("Refreshing live limits…");
+            return isFullSnapshotAction(pendingAction)
+                ? i18n("Refreshing all account limits…")
+                : i18n("Refreshing account limits…");
         }
         if (!currentAccount) {
             return i18n("No account data available");
         }
-        return i18n("%1 · %2 · %3",
-                    currentAccount.plan,
-                    currentAccount.usageSource === "live" ? i18n("Live") : i18n("Cached"),
-                    relativeTimestamp(currentAccountGeneratedAt));
+        return joinSummaryParts([
+            currentAccount.plan,
+            currentAccountStatusText()
+        ]);
+    }
+
+    function footerStatusText() {
+        if (actionInFlight) {
+            return isFullSnapshotAction(pendingAction)
+                ? i18n("Refreshing all account limits…")
+                : i18n("Refreshing account limits…");
+        }
+        if (isCachedAccountSnapshot(currentAccount)) {
+            const errorText = accountErrorText(currentAccount);
+            return joinSummaryParts([
+                i18n("Showing cached data from %1", relativeTimestamp(currentAccountGeneratedAt)),
+                errorText
+            ]);
+        }
+        return relativeTimestamp(snapshotGeneratedAt);
     }
 
     function relativeTimestamp(value) {
@@ -577,29 +765,28 @@ PlasmoidItem {
             const stdout = String(data.stdout ?? "");
             const stderr = String(data.stderr ?? "");
             const action = root.pendingAction;
-            root.pendingAction = "";
+            const snapshotAccountKey = root.pendingSnapshotAccountKey;
+            root.clearRequestState();
 
             if (exitCode !== 0) {
                 root.errorMessage = stderr.length > 0 ? stderr.trim() : i18n("Command failed");
-                root.actionInFlight = false;
                 root.isLoading = false;
                 return;
             }
 
-            if (action === "snapshot-active" || action === "snapshot-all" || action === "snapshot-background") {
-                root.parseSnapshot(stdout, action === "snapshot-active");
-                root.actionInFlight = false;
-                if ((action === "snapshot-all" || action === "snapshot-background") && root.shouldRefreshCurrentAccount()) {
-                    root.refreshCurrent(true);
-                    return;
-                }
-                if (root.autoSwitchEnabled && (action === "snapshot-active" || action === "snapshot-background")) {
+            if (root.isFullSnapshotAction(action) || action === "snapshot-active") {
+                root.parseSnapshot(stdout, false);
+                if (root.autoSwitchEnabled && action === "snapshot-background") {
                     root.maybeAutoSwitch();
                 }
                 return;
             }
 
-            root.actionInFlight = false;
+            if (action === "snapshot-account") {
+                root.parseSingleAccountSnapshot(stdout, snapshotAccountKey);
+                return;
+            }
+
             // For activate/remove the cached usage data is still valid — only the
             // active flag changes, which the collector reads fresh from the registry
             // on every snapshot. Skip --force-refresh so the panel updates immediately
@@ -615,6 +802,23 @@ PlasmoidItem {
         repeat: true
         running: true
         onTriggered: root.refreshBackground()
+    }
+
+    Timer {
+        id: requestWatchdog
+        interval: (root.liveFetchTimeoutSeconds + 5) * 1000
+        repeat: false
+        onTriggered: {
+            if (!root.actionInFlight) {
+                return;
+            }
+            const action = root.pendingAction;
+            console.warn("[codexbar-accounts] request watchdog fired for `" + action + "`");
+            executable.connectedSources = [];
+            root.errorMessage = root.timeoutMessage(action);
+            root.isLoading = false;
+            root.clearRequestState();
+        }
     }
 
     Component.onCompleted: refreshAll(true)

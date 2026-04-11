@@ -266,8 +266,12 @@ pub fn load_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV1> {
     match build_fresh_snapshot(options) {
         Ok(snapshot) => {
             if options.use_cache
-                && let Err(error) =
-                    write_cache(&options.paths.cache_path, &signatures, &snapshot, options.now)
+                && let Err(error) = write_cache(
+                    &options.paths.cache_path,
+                    &signatures,
+                    &snapshot,
+                    options.now,
+                )
             {
                 eprintln!("codexbar-collector: failed to write cache: {error}");
             }
@@ -351,7 +355,10 @@ fn read_source_safely(
     match reader() {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            eprintln!("codexbar-collector: {} unavailable: {error}", source_id.label());
+            eprintln!(
+                "codexbar-collector: {} unavailable: {error}",
+                source_id.label()
+            );
             SourceSnapshot {
                 id: source_id,
                 label: source_id.label(),
@@ -444,7 +451,10 @@ struct CodexHomeSnapshot {
     latest_timestamp: i64,
 }
 
-fn read_single_codex_home(codex_home: &Path, now: DateTime<FixedOffset>) -> Result<CodexHomeSnapshot> {
+fn read_single_codex_home(
+    codex_home: &Path,
+    now: DateTime<FixedOffset>,
+) -> Result<CodexHomeSnapshot> {
     if !codex_home.exists() {
         bail!("Codex home not found: {}", codex_home.display());
     }
@@ -552,7 +562,10 @@ fn read_claude_source(
     })
 }
 
-fn read_claude_stats_baseline(stats_path: &Path, now: DateTime<FixedOffset>) -> Result<ClaudeBaseline> {
+fn read_claude_stats_baseline(
+    stats_path: &Path,
+    now: DateTime<FixedOffset>,
+) -> Result<ClaudeBaseline> {
     if !stats_path.exists() {
         bail!("Claude stats file not found: {}", stats_path.display());
     }
@@ -596,7 +609,10 @@ fn read_claude_stats_baseline(stats_path: &Path, now: DateTime<FixedOffset>) -> 
             day_value,
             &window,
         );
-        update_latest_iso(&mut baseline.aggregate.latest_data_at, iso_from_day(day, now.offset()));
+        update_latest_iso(
+            &mut baseline.aggregate.latest_data_at,
+            iso_from_day(day, now.offset()),
+        );
     }
 
     baseline.aggregate.total_tokens = parsed
@@ -631,8 +647,8 @@ fn read_claude_project_usage(
         let reader = BufReader::new(file);
 
         for line in reader.lines() {
-            let line =
-                line.with_context(|| format!("Failed to read Claude project log {}", path.display()))?;
+            let line = line
+                .with_context(|| format!("Failed to read Claude project log {}", path.display()))?;
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -739,9 +755,7 @@ fn collect_jsonl_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn collect_jsonl_files_recursive(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(root)
-        .with_context(|| format!("Failed to read {}", root.display()))?
-    {
+    for entry in fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
@@ -806,7 +820,9 @@ fn claude_project_usage_tokens(usage: &ClaudeProjectUsage) -> u64 {
 
 fn collect_source_signatures(paths: &BuildPaths) -> Result<SourceSignatures> {
     Ok(SourceSignatures {
-        codex_db_mtime_ms: file_modified_ms(find_latest_state_db(&paths.codex_home).ok().as_deref())?,
+        codex_db_mtime_ms: file_modified_ms(
+            find_latest_state_db(&paths.codex_home).ok().as_deref(),
+        )?,
         extra_codex_db_signatures: collect_extra_codex_signatures(&paths.extra_codex_homes)?,
         claude_stats_mtime_ms: file_modified_ms(Some(paths.claude_stats_path.as_path()))?,
         claude_projects: collect_claude_projects_signature(&paths.claude_projects_path)?,
@@ -866,7 +882,8 @@ fn write_cache(
         snapshot: snapshot.clone(),
     };
 
-    let serialized = serde_json::to_string_pretty(&payload).context("Failed to encode cache JSON")?;
+    let serialized =
+        serde_json::to_string_pretty(&payload).context("Failed to encode cache JSON")?;
     let temp_path = cache_path.with_extension("tmp");
     fs::write(&temp_path, serialized)
         .with_context(|| format!("Failed to write {}", temp_path.display()))?;
@@ -979,21 +996,36 @@ fn find_latest_state_db(codex_home: &Path) -> Result<PathBuf> {
         .into_iter()
         .next()
         .map(|(_, path)| path)
-        .ok_or_else(|| anyhow!("No state_*.sqlite database found in {}", codex_home.display()))
+        .ok_or_else(|| {
+            anyhow!(
+                "No state_*.sqlite database found in {}",
+                codex_home.display()
+            )
+        })
 }
 
 fn iso_from_unix(timestamp: i64, offset: &FixedOffset) -> String {
     offset
         .timestamp_opt(timestamp, 0)
         .single()
-        .unwrap_or_else(|| offset.timestamp_millis_opt(0).single().expect("epoch timestamp"))
+        .unwrap_or_else(|| {
+            offset
+                .timestamp_millis_opt(0)
+                .single()
+                .expect("epoch timestamp")
+        })
         .to_rfc3339()
 }
 
 fn iso_from_day(day: &str, offset: &FixedOffset) -> Option<String> {
     let day = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
     let end_of_day = day.and_hms_opt(23, 59, 59)?;
-    Some(offset.from_local_datetime(&end_of_day).single()?.to_rfc3339())
+    Some(
+        offset
+            .from_local_datetime(&end_of_day)
+            .single()?
+            .to_rfc3339(),
+    )
 }
 
 struct DayWindow {
@@ -1063,7 +1095,11 @@ mod tests {
         create_codex_fixture_at(&root.path().join(".codex"), 200, 100)
     }
 
-    fn create_codex_fixture_at(codex_home: &Path, active_tokens: i64, archived_tokens: i64) -> Result<()> {
+    fn create_codex_fixture_at(
+        codex_home: &Path,
+        active_tokens: i64,
+        archived_tokens: i64,
+    ) -> Result<()> {
         fs::create_dir_all(codex_home)?;
 
         let db = Connection::open(codex_home.join("state_1.sqlite"))?;
@@ -1176,7 +1212,11 @@ mod tests {
         Ok(())
     }
 
-    fn write_claude_project_log(root: &TempDir, relative_path: &str, events: &[serde_json::Value]) -> Result<()> {
+    fn write_claude_project_log(
+        root: &TempDir,
+        relative_path: &str,
+        events: &[serde_json::Value],
+    ) -> Result<()> {
         let path = root
             .path()
             .join(".claude")
@@ -1243,7 +1283,11 @@ mod tests {
         assert_eq!(snapshot.unavailable_source_count, 0);
         assert_eq!(snapshot.status, SnapshotStatus::Ok);
         assert_eq!(
-            snapshot.sources.iter().map(|source| source.total_tokens).collect::<Vec<_>>(),
+            snapshot
+                .sources
+                .iter()
+                .map(|source| source.total_tokens)
+                .collect::<Vec<_>>(),
             vec![300, 160]
         );
 
@@ -1254,7 +1298,13 @@ mod tests {
     fn build_fresh_snapshot_aggregates_multiple_codex_homes() -> Result<()> {
         let root = TempDir::new()?;
         create_codex_fixture(&root)?;
-        let windows_codex_home = root.path().join("mnt").join("c").join("Users").join("k").join(".codex");
+        let windows_codex_home = root
+            .path()
+            .join("mnt")
+            .join("c")
+            .join("Users")
+            .join("k")
+            .join(".codex");
         create_codex_fixture_at(&windows_codex_home, 40, 20)?;
         create_claude_fixture(&root)?;
 
@@ -1329,7 +1379,8 @@ mod tests {
 
         let now = DateTime::parse_from_rfc3339("2026-03-24T12:00:00+08:00")?;
         let paths = build_test_paths(&root);
-        let snapshot = read_claude_source(&paths.claude_stats_path, &paths.claude_projects_path, now)?;
+        let snapshot =
+            read_claude_source(&paths.claude_stats_path, &paths.claude_projects_path, now)?;
 
         assert_eq!(snapshot.total_tokens, 210);
         assert_eq!(snapshot.tokens_today, 30);
@@ -1420,7 +1471,11 @@ mod tests {
         )?;
 
         let paths = build_test_paths(&root);
-        let snapshot = read_claude_source(&paths.claude_stats_path, &paths.claude_projects_path, test_now())?;
+        let snapshot = read_claude_source(
+            &paths.claude_stats_path,
+            &paths.claude_projects_path,
+            test_now(),
+        )?;
 
         assert_eq!(snapshot.total_tokens, 40);
         assert_eq!(snapshot.tokens_today, 25);
@@ -1470,10 +1525,12 @@ mod tests {
 
         assert_eq!(stale_snapshot.status, SnapshotStatus::Stale);
         assert_eq!(stale_snapshot.total_tokens, 460);
-        assert!(stale_snapshot
-            .error
-            .as_deref()
-            .is_some_and(|message| message.contains("No panel sources are available")));
+        assert!(
+            stale_snapshot
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("No panel sources are available"))
+        );
 
         Ok(())
     }
@@ -1491,7 +1548,9 @@ mod tests {
         let before = collect_source_signatures(&paths)?;
 
         std::thread::sleep(StdDuration::from_secs(1));
-        let mut file = File::options().append(true).open(&paths.claude_stats_path)?;
+        let mut file = File::options()
+            .append(true)
+            .open(&paths.claude_stats_path)?;
         writeln!(file, " ")?;
         file.sync_all()?;
 
@@ -1549,7 +1608,10 @@ mod tests {
 
         let signatures = collect_source_signatures(&paths)?;
         assert_eq!(signatures.extra_codex_db_signatures.len(), 1);
-        assert_eq!(signatures.extra_codex_db_signatures[0].path, extra_home.display().to_string());
+        assert_eq!(
+            signatures.extra_codex_db_signatures[0].path,
+            extra_home.display().to_string()
+        );
         assert!(signatures.extra_codex_db_signatures[0].mtime_ms.is_some());
 
         Ok(())

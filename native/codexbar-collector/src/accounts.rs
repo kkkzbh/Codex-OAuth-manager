@@ -23,7 +23,7 @@ const WARMUP_MODEL: &str = "gpt-5";
 const WARMUP_PROMPT: &str = "ok";
 const DEFAULT_SOFT_TTL_SECONDS: i64 = 60;
 const DEFAULT_HARD_TTL_SECONDS: i64 = 15 * 60;
-const DEFAULT_TIMEOUT_SECONDS: u64 = 8;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 12;
 const DEFAULT_CONCURRENCY: usize = 4;
 const AUTO_SWITCH_COOLDOWN_SECONDS: i64 = 15 * 60;
 const MAX_BACKOFF_SECONDS: i64 = 10 * 60;
@@ -66,6 +66,7 @@ pub struct AccountsSnapshotOptions {
     pub timeout: StdDuration,
     pub force_refresh: bool,
     pub active_only: bool,
+    pub account_key: Option<String>,
     pub concurrency: usize,
 }
 
@@ -79,6 +80,7 @@ impl Default for AccountsSnapshotOptions {
             timeout: StdDuration::from_secs(DEFAULT_TIMEOUT_SECONDS),
             force_refresh: false,
             active_only: false,
+            account_key: None,
             concurrency: DEFAULT_CONCURRENCY,
         }
     }
@@ -399,7 +401,13 @@ pub fn load_accounts_snapshot(options: &AccountsSnapshotOptions) -> Result<Accou
     sync_current_auth_into_registry(&options.paths, &mut registry)?;
     let mut cache = read_accounts_cache(&options.paths.cache_path).unwrap_or_default();
     let auth_files = discover_auth_files(&options.paths.accounts_dir)?;
-    let contexts = build_account_contexts(&registry, auth_files, &cache, options.active_only);
+    let contexts = build_account_contexts(
+        &registry,
+        auth_files,
+        &cache,
+        options.active_only,
+        options.account_key.as_deref(),
+    )?;
     let client = Arc::new(build_http_client(options.timeout)?);
 
     let threads = options.concurrency.max(1);
@@ -717,6 +725,7 @@ pub fn auto_switch_account(options: &AutoSwitchOptions) -> Result<AccountActionR
         timeout: options.timeout,
         force_refresh: options.force_refresh,
         active_only: false,
+        account_key: None,
         concurrency: options.concurrency,
     })?;
 
@@ -1039,8 +1048,24 @@ fn build_account_contexts(
     auth_files: HashMap<String, (PathBuf, AuthFile)>,
     cache: &AccountsCacheEnvelope,
     active_only: bool,
-) -> Vec<AccountContext> {
-    registry
+    requested_account_key: Option<&str>,
+) -> Result<Vec<AccountContext>> {
+    if let Some(account_key) = requested_account_key {
+        let account = registry
+            .accounts
+            .iter()
+            .find(|account| account.account_key == account_key)
+            .cloned()
+            .with_context(|| format!("Unknown account key: {account_key}"))?;
+        return Ok(vec![build_account_context(
+            &account,
+            registry.active_account_key.as_deref(),
+            &auth_files,
+            cache,
+        )]);
+    }
+
+    Ok(registry
         .accounts
         .iter()
         .filter(|account| {
@@ -1048,21 +1073,34 @@ fn build_account_contexts(
                 || registry.active_account_key.as_deref() == Some(account.account_key.as_str())
         })
         .map(|account| {
-            let auth_match = account
-                .chatgpt_account_id
-                .as_ref()
-                .and_then(|account_id| auth_files.get(account_id))
-                .cloned();
-            AccountContext {
-                registry: account.clone(),
-                auth_file_path: auth_match.as_ref().map(|entry| entry.0.clone()),
-                auth_file: auth_match.map(|entry| entry.1),
-                cached: cache.accounts.get(&account.account_key).cloned(),
-                is_active: registry.active_account_key.as_deref()
-                    == Some(account.account_key.as_str()),
-            }
+            build_account_context(
+                account,
+                registry.active_account_key.as_deref(),
+                &auth_files,
+                cache,
+            )
         })
-        .collect()
+        .collect())
+}
+
+fn build_account_context(
+    account: &RegistryAccount,
+    active_account_key: Option<&str>,
+    auth_files: &HashMap<String, (PathBuf, AuthFile)>,
+    cache: &AccountsCacheEnvelope,
+) -> AccountContext {
+    let auth_match = account
+        .chatgpt_account_id
+        .as_ref()
+        .and_then(|account_id| auth_files.get(account_id))
+        .cloned();
+    AccountContext {
+        registry: account.clone(),
+        auth_file_path: auth_match.as_ref().map(|entry| entry.0.clone()),
+        auth_file: auth_match.map(|entry| entry.1),
+        cached: cache.accounts.get(&account.account_key).cloned(),
+        is_active: active_account_key == Some(account.account_key.as_str()),
+    }
 }
 
 fn resolve_account_snapshot(
@@ -1245,9 +1283,7 @@ fn fetch_usage_with_access_token(
     if let Some(id) = chatgpt_account_id {
         request = request.header("chatgpt-account-id", id);
     }
-    request
-        .send()
-        .context("Failed to query usage endpoint")
+    request.send().context("Failed to query usage endpoint")
 }
 
 fn refresh_auth_tokens(client: &Client, auth_file: &mut AuthFile) -> Result<()> {
@@ -1670,6 +1706,90 @@ mod tests {
         Ok(())
     }
 
+    fn cached_account_entry(
+        account_key: &str,
+        account_id: &str,
+        user_id: &str,
+        email: &str,
+        alias: &str,
+        workspace_name: Option<&str>,
+        plan: &str,
+        is_active: bool,
+    ) -> CachedAccountEntry {
+        let now = test_now();
+        CachedAccountEntry {
+            snapshot: AccountUsageSnapshot {
+                account_key: account_key.to_string(),
+                account_id: Some(account_id.to_string()),
+                user_id: Some(user_id.to_string()),
+                email: email.to_string(),
+                alias: alias.to_string(),
+                workspace_name: workspace_name.map(str::to_string),
+                plan: plan.to_string(),
+                auth_mode: "chatgpt".to_string(),
+                is_active,
+                is_reachable: true,
+                status: AccountSnapshotStatus::Ok,
+                usage_source: UsageSource::Cache,
+                generated_at: now.to_rfc3339(),
+                last_usage_at: Some(now.to_rfc3339()),
+                session: Some(UsageWindowSnapshot {
+                    used_percent: 20,
+                    window_minutes: 300,
+                    resets_at: (now + Duration::minutes(300)).to_rfc3339(),
+                    resets_in_label: "in 5h".to_string(),
+                }),
+                weekly: Some(UsageWindowSnapshot {
+                    used_percent: 40,
+                    window_minutes: 10080,
+                    resets_at: (now + Duration::days(7)).to_rfc3339(),
+                    resets_in_label: "in 7d".to_string(),
+                }),
+                error: None,
+            },
+            failure_count: 0,
+            next_retry_at: None,
+            last_live_success_at: Some(now.to_rfc3339()),
+        }
+    }
+
+    fn write_test_accounts_cache(paths: &AccountsPaths) -> Result<()> {
+        write_accounts_cache(
+            &paths.cache_path,
+            &AccountsCacheEnvelope {
+                accounts: HashMap::from([
+                    (
+                        "user-a::acct-1".to_string(),
+                        cached_account_entry(
+                            "user-a::acct-1",
+                            "acct-1",
+                            "user-a",
+                            "a@example.com",
+                            "Alpha",
+                            Some("Acme Workspace"),
+                            "team",
+                            true,
+                        ),
+                    ),
+                    (
+                        "user-b::acct-2".to_string(),
+                        cached_account_entry(
+                            "user-b::acct-2",
+                            "acct-2",
+                            "user-b",
+                            "b@example.com",
+                            "",
+                            None,
+                            "plus",
+                            false,
+                        ),
+                    ),
+                ]),
+                auto_switch_last_applied_at: None,
+            },
+        )
+    }
+
     #[test]
     fn activate_account_replaces_auth_and_registry() -> Result<()> {
         let root = TempDir::new()?;
@@ -1685,6 +1805,81 @@ mod tests {
 
         let auth: AuthFile = serde_json::from_str(&fs::read_to_string(&paths.auth_path)?)?;
         assert_eq!(auth.tokens.account_id.as_deref(), Some("acct-2"));
+        Ok(())
+    }
+
+    #[test]
+    fn load_accounts_snapshot_active_only_returns_active_account() -> Result<()> {
+        let root = TempDir::new()?;
+        create_fixture(&root)?;
+        let paths = test_paths(&root);
+        write_test_accounts_cache(&paths)?;
+
+        let snapshot = load_accounts_snapshot(&AccountsSnapshotOptions {
+            now: test_now(),
+            paths,
+            active_only: true,
+            ..AccountsSnapshotOptions::default()
+        })?;
+        let active_account_key = read_registry(&test_paths(&root).registry_path)?
+            .active_account_key
+            .unwrap_or_default();
+
+        assert_eq!(snapshot.account_count, 1);
+        assert_eq!(snapshot.accounts.len(), 1);
+        assert_eq!(snapshot.accounts[0].account_key, active_account_key);
+        assert_eq!(
+            snapshot.active_account_key.as_deref(),
+            Some(active_account_key.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_accounts_snapshot_filters_to_requested_account_key() -> Result<()> {
+        let root = TempDir::new()?;
+        create_fixture(&root)?;
+        let paths = test_paths(&root);
+        write_test_accounts_cache(&paths)?;
+
+        let snapshot = load_accounts_snapshot(&AccountsSnapshotOptions {
+            now: test_now(),
+            paths,
+            account_key: Some("user-b::acct-2".to_string()),
+            ..AccountsSnapshotOptions::default()
+        })?;
+        let active_account_key = read_registry(&test_paths(&root).registry_path)?
+            .active_account_key
+            .unwrap_or_default();
+
+        assert_eq!(snapshot.account_count, 1);
+        assert_eq!(snapshot.accounts.len(), 1);
+        assert_eq!(snapshot.accounts[0].account_key, "user-b::acct-2");
+        assert_eq!(
+            snapshot.active_account_key.as_deref(),
+            Some(active_account_key.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_accounts_snapshot_rejects_unknown_account_key() -> Result<()> {
+        let root = TempDir::new()?;
+        create_fixture(&root)?;
+
+        let error = load_accounts_snapshot(&AccountsSnapshotOptions {
+            now: test_now(),
+            paths: test_paths(&root),
+            account_key: Some("missing::account".to_string()),
+            ..AccountsSnapshotOptions::default()
+        })
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unknown account key: missing::account")
+        );
         Ok(())
     }
 
