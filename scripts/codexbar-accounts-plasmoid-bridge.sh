@@ -15,12 +15,74 @@ TERMINAL_COMMAND="${TERMINAL_COMMAND:-}"
 LOGIN_COMMAND="${LOGIN_COMMAND:-codex login}"
 AUTO_SWITCH_5H_THRESHOLD="${AUTO_SWITCH_5H_THRESHOLD:-10}"
 AUTO_SWITCH_WEEKLY_THRESHOLD="${AUTO_SWITCH_WEEKLY_THRESHOLD:-5}"
+CLASH_VERGE_CONFIG_PATH="${CLASH_VERGE_CONFIG_PATH:-$HOME/.local/share/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml}"
+DEFAULT_NO_PROXY="${DEFAULT_NO_PROXY:-localhost,127.0.0.1,::1}"
 
 mkdir -p "$LOG_DIR"
 
 timestamp() {
   date -Iseconds
 }
+
+has_proxy_env() {
+  [[ -n "${http_proxy:-}" \
+    || -n "${https_proxy:-}" \
+    || -n "${all_proxy:-}" \
+    || -n "${HTTP_PROXY:-}" \
+    || -n "${HTTPS_PROXY:-}" \
+    || -n "${ALL_PROXY:-}" ]]
+}
+
+detect_clash_verge_port() {
+  local config_path="${1:-}"
+  [[ -f "$config_path" ]] || return 1
+
+  awk -F ':' '
+    /^[[:space:]]*mixed-port:[[:space:]]*[0-9]+[[:space:]]*$/ {
+      value=$2
+      gsub(/[^0-9]/, "", value)
+      print value
+      exit
+    }
+    /^[[:space:]]*port:[[:space:]]*[0-9]+[[:space:]]*$/ {
+      value=$2
+      gsub(/[^0-9]/, "", value)
+      print value
+      exit
+    }
+  ' "$config_path"
+}
+
+port_is_listening() {
+  local port="${1:-}"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  ss -ltn "( sport = :$port )" 2>/dev/null | grep -q LISTEN
+}
+
+bootstrap_proxy_env() {
+  if has_proxy_env; then
+    return 0
+  fi
+
+  local detected_port
+  detected_port="$(detect_clash_verge_port "$CLASH_VERGE_CONFIG_PATH" || true)"
+  if [[ -z "$detected_port" ]] || ! port_is_listening "$detected_port"; then
+    return 0
+  fi
+
+  local proxy_url="http://127.0.0.1:${detected_port}"
+  export http_proxy="$proxy_url"
+  export https_proxy="$proxy_url"
+  export all_proxy="$proxy_url"
+  export HTTP_PROXY="$proxy_url"
+  export HTTPS_PROXY="$proxy_url"
+  export ALL_PROXY="$proxy_url"
+  export no_proxy="${no_proxy:-${NO_PROXY:-$DEFAULT_NO_PROXY}}"
+  export NO_PROXY="$no_proxy"
+  printf '[%s] proxy=bootstrapped source=clash-verge port=%s\n' "$(timestamp)" "$detected_port" >>"$LOG_FILE"
+}
+
+bootstrap_proxy_env
 
 cmd="${1:-snapshot}"
 shift || true

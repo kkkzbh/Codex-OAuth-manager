@@ -18,6 +18,9 @@
     <entry name="refreshIntervalSeconds" type="Int">
       <default>120</default>
     </entry>
+    <entry name="startupRefreshDelaySeconds" type="Int">
+      <default>15</default>
+    </entry>
     <entry name="warnPercent" type="Int">
       <default>75</default>
     </entry>

@@ -19,6 +19,7 @@ PlasmoidItem {
     readonly property string collectorPathExpanded: expandPath(Plasmoid.configuration.collectorPath || "~/.local/bin/codexbar-collector")
     readonly property string codexHomePathExpanded: expandPath(Plasmoid.configuration.codexHomePath || "~/.codex")
     readonly property int refreshIntervalSeconds: Math.max(10, Plasmoid.configuration.refreshIntervalSeconds || 120)
+    readonly property int startupRefreshDelaySeconds: Math.max(0, Plasmoid.configuration.startupRefreshDelaySeconds || 15)
     readonly property int warnPercent: Plasmoid.configuration.warnPercent || 75
     readonly property int dangerPercent: Plasmoid.configuration.dangerPercent || 90
     readonly property int liveFetchConcurrency: Math.max(1, Plasmoid.configuration.liveFetchConcurrency || 4)
@@ -805,6 +806,13 @@ PlasmoidItem {
     }
 
     Timer {
+        id: startupRefreshTimer
+        interval: root.startupRefreshDelaySeconds * 1000
+        repeat: false
+        onTriggered: root.refreshAll(true)
+    }
+
+    Timer {
         id: requestWatchdog
         interval: (root.liveFetchTimeoutSeconds + 5) * 1000
         repeat: false
@@ -821,7 +829,13 @@ PlasmoidItem {
         }
     }
 
-    Component.onCompleted: refreshAll(true)
+    Component.onCompleted: {
+        if (root.startupRefreshDelaySeconds > 0) {
+            startupRefreshTimer.start();
+            return;
+        }
+        refreshAll(true);
+    }
 
     PlasmaCore.Action {
         id: refreshAction
