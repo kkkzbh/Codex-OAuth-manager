@@ -49,7 +49,7 @@ cd codex-usage
 bash scripts/install-codexbar.sh
 ```
 
-3. 安装完成后，在 Plasma 面板空白处右键，打开添加或管理小组件界面，搜索并添加 `CodexBar Accounts`。
+3. 安装完成后，在 Plasma 面板空白处右键，打开添加或管理小组件界面，搜索并添加 `CodexBar Accounts`（以及可选的 `CodexBar Workers`，用于显示 Codex 桌面应用当前正在工作的进程数量：空闲时为绿灯、有任务时为红灯 + 白色环形加载特效 + 中心数字）。
 
 4. 后续更新时，重新进入仓库目录执行同一条命令即可：
 
