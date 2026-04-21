@@ -19,7 +19,7 @@ const USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 const RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const WARMUP_MODEL: &str = "gpt-5";
+const WARMUP_MODEL: &str = "gpt-5.4-mini";
 const WARMUP_PROMPT: &str = "ok";
 const DEFAULT_SOFT_TTL_SECONDS: i64 = 60;
 const DEFAULT_HARD_TTL_SECONDS: i64 = 15 * 60;
@@ -607,24 +607,7 @@ fn send_responses_warmup(
         .as_deref()
         .ok_or_else(|| anyhow!("Auth file is missing access_token"))?;
 
-    // Minimal Responses API payload. The endpoint *requires* `stream: true`
-    // (it returns 400 "Stream must be set to true" otherwise), so we ask for
-    // the cheapest possible streamed response and drain it. `store: false`
-    // avoids polluting the account's saved history; `max_output_tokens: 16`
-    // keeps token spend trivial. The goal isn't to get a useful answer —
-    // just to ping the Responses endpoint as this account so OpenAI starts
-    // the rolling 5h rate-limit window.
-    let body = serde_json::json!({
-        "model": WARMUP_MODEL,
-        "instructions": "Reply with the single word: ok",
-        "input": [{
-            "type": "message",
-            "role": "user",
-            "content": [{ "type": "input_text", "text": WARMUP_PROMPT }]
-        }],
-        "store": false,
-        "stream": true
-    });
+    let body = build_warmup_request_body();
 
     let mut request = client
         .post(RESPONSES_ENDPOINT)
@@ -639,6 +622,24 @@ fn send_responses_warmup(
     request
         .send()
         .context("Failed to send warm-up request to Responses endpoint")
+}
+
+fn build_warmup_request_body() -> serde_json::Value {
+    // Minimal Responses API payload. The endpoint requires `stream: true`, so
+    // we send the cheapest fixed lightweight model and drain the SSE stream.
+    // `store: false` avoids polluting saved history. The goal is not to get a
+    // useful answer, only to trigger the account's rolling 5h usage window.
+    serde_json::json!({
+        "model": WARMUP_MODEL,
+        "instructions": "Reply with the single word: ok",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{ "type": "input_text", "text": WARMUP_PROMPT }]
+        }],
+        "store": false,
+        "stream": true
+    })
 }
 
 pub fn remove_account(paths: &AccountsPaths, account_key: &str) -> Result<AccountActionResult> {
@@ -1806,6 +1807,56 @@ mod tests {
         let auth: AuthFile = serde_json::from_str(&fs::read_to_string(&paths.auth_path)?)?;
         assert_eq!(auth.tokens.account_id.as_deref(), Some("acct-2"));
         Ok(())
+    }
+
+    #[test]
+    fn warmup_request_body_uses_fixed_lightweight_model() {
+        let body = build_warmup_request_body();
+
+        assert_eq!(
+            body.get("model").and_then(|value| value.as_str()),
+            Some("gpt-5.4-mini")
+        );
+        assert_eq!(
+            body.get("stream").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("store").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            body.get("instructions").and_then(|value| value.as_str()),
+            Some("Reply with the single word: ok")
+        );
+
+        let input = body
+            .get("input")
+            .and_then(|value| value.as_array())
+            .expect("warm-up request body should include input array");
+        assert_eq!(input.len(), 1);
+        assert_eq!(
+            input[0].get("type").and_then(|value| value.as_str()),
+            Some("message")
+        );
+        assert_eq!(
+            input[0].get("role").and_then(|value| value.as_str()),
+            Some("user")
+        );
+
+        let content = input[0]
+            .get("content")
+            .and_then(|value| value.as_array())
+            .expect("warm-up request input should include content array");
+        assert_eq!(content.len(), 1);
+        assert_eq!(
+            content[0].get("type").and_then(|value| value.as_str()),
+            Some("input_text")
+        );
+        assert_eq!(
+            content[0].get("text").and_then(|value| value.as_str()),
+            Some(WARMUP_PROMPT)
+        );
     }
 
     #[test]
