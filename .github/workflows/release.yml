@@ -12,14 +12,15 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
     steps:
+      - name: Install base dependencies
+        run: |
+          dnf install -y git gcc make pkgconf-pkg-config zip kf6-kpackage
+
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Install packaging dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zip kpackagetool6
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
