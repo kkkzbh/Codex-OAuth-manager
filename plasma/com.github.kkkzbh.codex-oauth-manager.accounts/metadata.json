@@ -15,10 +15,13 @@
       "desktop"
     ],
     "Icon": "codex-app",
-    "Id": "local.codexbar.accounts",
+    "Id": "com.github.kkkzbh.codex-oauth-manager.accounts",
     "License": "MIT",
     "Name": "CodexBar Accounts",
-    "Name[zh_CN]": "CodexBar Accounts"
+    "Name[zh_CN]": "CodexBar Accounts",
+    "Version": "0.0.1",
+    "Website": "https://github.com/kkkzbh/Codex-OAuth-manager",
+    "BugReportUrl": "https://github.com/kkkzbh/Codex-OAuth-manager/issues"
   },
   "X-Plasma-API-Minimum-Version": "6.0"
 }

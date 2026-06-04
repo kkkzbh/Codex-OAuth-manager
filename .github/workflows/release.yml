@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip kpackagetool6
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test collector
+        run: cargo test --manifest-path native/codexbar-collector/Cargo.toml
+
+      - name: Build release assets
+        run: scripts/package-release.sh
+
+      - name: Validate plasmoid metadata
+        run: |
+          kpackagetool6 --appstream-metainfo \
+            dist/com.github.kkkzbh.codex-oauth-manager.accounts.plasmoid \
+            >/tmp/codex-oauth-manager.appstream.xml
+          grep -q 'com.github.kkkzbh.codex-oauth-manager.accounts' \
+            /tmp/codex-oauth-manager.appstream.xml
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          body_path: docs/release-notes/v0.0.1.md
+          files: |
+            dist/codex-oauth-manager-v0.0.1-linux-x86_64.tar.gz
+            dist/com.github.kkkzbh.codex-oauth-manager.accounts.plasmoid
+            dist/checksums.txt
+            install.sh

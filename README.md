@@ -21,7 +21,6 @@ _展开后可以查看多个账号的 5 小时 / 1 周额度，并执行刷新�
 
 - `Linux`
 - `KDE Plasma 6`
-- 已安装 `Rust / Cargo`
 - 已安装 `kpackagetool6`
 - 已安装并可在终端中运行 `codex`
 - 不支持 `Windows` / `macOS` 原生安装
@@ -29,35 +28,23 @@ _展开后可以查看多个账号的 5 小时 / 1 周额度，并执行刷新�
 如果你只是想确认依赖是否已就绪，可以先执行：
 
 ```bash
-cargo --version
 kpackagetool6 --version
 codex --version
 ```
 
 ## 安装方法
 
-1. 获取仓库源码。
+### 推荐：从 GitHub Release 安装
 
 ```bash
-git clone <仓库地址>
-cd codex-usage
+curl -fsSL https://github.com/kkkzbh/Codex-OAuth-manager/releases/latest/download/install.sh | bash
 ```
 
-2. 运行安装脚本。
+安装脚本会下载 Release 包，安装预编译的 `codexbar-collector`、桥接脚本和 `CodexBar Accounts` 小组件。
 
-```bash
-bash scripts/install-codexbar.sh
-```
+如果系统缺少 `kpackagetool6` 等依赖，脚本会显示将要执行的包管理器命令，并用 `[y/N]` 询问是否安装。缺少 `codex` 时脚本不会自动安装 Codex，只会提示你先安装 Codex CLI；你不需要提前登录，后续可以在小组件里点击 `+` 执行 `codex login`。
 
-3. 安装完成后，在 Plasma 面板空白处右键，打开添加或管理小组件界面，搜索并添加 `CodexBar Accounts`（以及可选的 `CodexBar Workers`，用于显示 Codex 桌面应用当前正在工作的进程数量：空闲时为绿灯、有任务时为红灯 + 白色环形加载特效 + 中心数字）。
-
-4. 后续更新时，重新进入仓库目录执行同一条命令即可：
-
-```bash
-bash scripts/install-codexbar.sh
-```
-
-安装脚本会编译并安装 `codexbar-collector`、桥接脚本，以及 `CodexBar Accounts` 运行所需组件。
+安装完成后，在 Plasma 面板空白处右键，打开添加或管理小组件界面，搜索并添加 `CodexBar Accounts`。
 
 ## 使用教程
 
