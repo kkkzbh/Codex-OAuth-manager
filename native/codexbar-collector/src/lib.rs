@@ -973,35 +973,57 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 fn find_latest_state_db(codex_home: &Path) -> Result<PathBuf> {
-    let entries = fs::read_dir(codex_home)
-        .with_context(|| format!("Failed to read {}", codex_home.display()))?;
-    let mut matches: Vec<(u64, PathBuf)> = Vec::new();
+    let mut matches: Vec<(usize, u64, PathBuf)> = Vec::new();
 
-    for entry in entries {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
+    for (priority, dir) in state_db_search_dirs(codex_home).into_iter().enumerate() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
 
-        if let Some(number) = file_name
-            .strip_prefix("state_")
-            .and_then(|suffix| suffix.strip_suffix(".sqlite"))
-            .and_then(|suffix| suffix.parse::<u64>().ok())
-        {
-            matches.push((number, entry.path()));
+        for entry in entries {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+
+            if let Some(number) = file_name
+                .strip_prefix("state_")
+                .and_then(|suffix| suffix.strip_suffix(".sqlite"))
+                .and_then(|suffix| suffix.parse::<u64>().ok())
+            {
+                matches.push((priority, number, entry.path()));
+            }
         }
     }
 
-    matches.sort_by(|left, right| right.0.cmp(&left.0));
+    matches.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     matches
         .into_iter()
         .next()
-        .map(|(_, path)| path)
+        .map(|(_, _, path)| path)
         .ok_or_else(|| {
             anyhow!(
-                "No state_*.sqlite database found in {}",
+                "No state_*.sqlite database found in {} or its sqlite directory",
                 codex_home.display()
             )
         })
+}
+
+fn state_db_search_dirs(codex_home: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Some(path) = std::env::var_os("CODEX_SQLITE_HOME").map(PathBuf::from)
+        && is_same_or_descendant(&path, codex_home)
+    {
+        dirs.push(path);
+    }
+
+    dirs.push(codex_home.join("sqlite"));
+    dirs.push(codex_home.to_path_buf());
+    dedupe_paths(dirs)
+}
+
+fn is_same_or_descendant(path: &Path, parent: &Path) -> bool {
+    path == parent || path.starts_with(parent)
 }
 
 fn iso_from_unix(timestamp: i64, offset: &FixedOffset) -> String {
@@ -1323,6 +1345,22 @@ mod tests {
         assert_eq!(snapshot.tokens_7d, 450);
         assert_eq!(snapshot.tokens_30d, 460);
         assert_eq!(snapshot.sources[0].total_tokens, 360);
+
+        Ok(())
+    }
+
+    #[test]
+    fn read_codex_source_prefers_nested_sqlite_state_db() -> Result<()> {
+        let root = TempDir::new()?;
+        let codex_home = root.path().join(".codex");
+        create_codex_fixture_at(&codex_home, 200, 100)?;
+        create_codex_fixture_at(&codex_home.join("sqlite"), 900, 100)?;
+
+        let snapshot = read_codex_source(&codex_home, &[], test_now())?;
+
+        assert_eq!(snapshot.total_tokens, 1_000);
+        assert_eq!(snapshot.tokens_today, 900);
+        assert_eq!(snapshot.tokens_7d, 1_000);
 
         Ok(())
     }
