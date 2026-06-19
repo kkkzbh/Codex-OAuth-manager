@@ -137,26 +137,26 @@ PlasmaExtras.Representation {
                 }
 
                 PlasmaComponents3.Label {
-                    text: i18n("7 days")
+                    text: i18n("This week")
                     opacity: 0.65
                 }
 
                 PlasmaComponents3.Label {
                     Layout.fillWidth: true
-                    text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokens7d)
+                    text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokensWeek)
                     font.weight: Font.DemiBold
                     horizontalAlignment: Text.AlignRight
                     elide: Text.ElideLeft
                 }
 
                 PlasmaComponents3.Label {
-                    text: i18n("30 days")
+                    text: i18n("This month")
                     opacity: 0.65
                 }
 
                 PlasmaComponents3.Label {
                     Layout.fillWidth: true
-                    text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokens30d)
+                    text: fullRoot.rootItem.formatInteger(fullRoot.rootItem.snapshot.tokensMonth)
                     font.weight: Font.DemiBold
                     horizontalAlignment: Text.AlignRight
                     elide: Text.ElideLeft

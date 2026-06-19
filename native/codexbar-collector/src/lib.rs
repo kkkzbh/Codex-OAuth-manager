@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, Duration, FixedOffset, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Duration, FixedOffset, Local, NaiveDate, TimeZone};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
@@ -33,13 +33,13 @@ pub struct BuildPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct PanelSnapshotV1 {
+pub struct PanelSnapshotV2 {
     pub generated_at: String,
     pub total_tokens: u64,
     pub formatted_total_tokens: String,
     pub tokens_today: u64,
-    pub tokens_7d: u64,
-    pub tokens_30d: u64,
+    pub tokens_week: u64,
+    pub tokens_month: u64,
     pub sources: Vec<PanelSourceSnapshot>,
     pub available_source_count: u32,
     pub unavailable_source_count: u32,
@@ -106,7 +106,7 @@ struct ClaudeProjectsSignature {
 struct CacheEnvelope {
     saved_at: String,
     source_signatures: SourceSignatures,
-    snapshot: PanelSnapshotV1,
+    snapshot: PanelSnapshotV2,
 }
 
 #[derive(Debug, Clone)]
@@ -116,8 +116,8 @@ struct SourceSnapshot {
     available: bool,
     total_tokens: u64,
     tokens_today: u64,
-    tokens_7d: u64,
-    tokens_30d: u64,
+    tokens_week: u64,
+    tokens_month: u64,
     latest_data_at: Option<String>,
 }
 
@@ -194,8 +194,8 @@ struct ClaudeProjectUsage {
 struct ClaudeAggregate {
     total_tokens: u64,
     tokens_today: u64,
-    tokens_7d: u64,
-    tokens_30d: u64,
+    tokens_week: u64,
+    tokens_month: u64,
     latest_data_at: Option<String>,
 }
 
@@ -247,12 +247,12 @@ impl Default for BuildPaths {
             extra_codex_homes: default_extra_codex_homes(),
             claude_stats_path: home_dir.join(".claude").join("stats-cache.json"),
             claude_projects_path: home_dir.join(".claude").join("projects"),
-            cache_path: cache_root.join("codexbar").join("panel-snapshot-v1.json"),
+            cache_path: cache_root.join("codexbar").join("panel-snapshot-v2.json"),
         }
     }
 }
 
-pub fn load_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV1> {
+pub fn load_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV2> {
     let signatures = collect_source_signatures(&options.paths)?;
     let cached = read_cache(&options.paths.cache_path).ok();
 
@@ -290,7 +290,7 @@ pub fn load_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV1> {
     }
 }
 
-pub fn build_fresh_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV1> {
+pub fn build_fresh_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV2> {
     let mut sources = Vec::new();
 
     sources.push(read_source_safely(SourceId::Codex, || {
@@ -314,18 +314,18 @@ pub fn build_fresh_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV1
 
     let total_tokens = sources.iter().map(|source| source.total_tokens).sum();
     let tokens_today = sources.iter().map(|source| source.tokens_today).sum();
-    let tokens_7d = sources.iter().map(|source| source.tokens_7d).sum();
-    let tokens_30d = sources.iter().map(|source| source.tokens_30d).sum();
+    let tokens_week = sources.iter().map(|source| source.tokens_week).sum();
+    let tokens_month = sources.iter().map(|source| source.tokens_month).sum();
     let unavailable_source_count = sources.iter().filter(|source| !source.available).count() as u32;
     let available_source_count = sources.len() as u32 - unavailable_source_count;
 
-    Ok(PanelSnapshotV1 {
+    Ok(PanelSnapshotV2 {
         generated_at: options.now.to_rfc3339(),
         total_tokens,
         formatted_total_tokens: format_token_count(total_tokens),
         tokens_today,
-        tokens_7d,
-        tokens_30d,
+        tokens_week,
+        tokens_month,
         sources: sources
             .into_iter()
             .map(|source| PanelSourceSnapshot {
@@ -365,8 +365,8 @@ fn read_source_safely(
                 available: false,
                 total_tokens: 0,
                 tokens_today: 0,
-                tokens_7d: 0,
-                tokens_30d: 0,
+                tokens_week: 0,
+                tokens_month: 0,
                 latest_data_at: None,
             }
         }
@@ -385,8 +385,8 @@ fn read_codex_source(
 
     let mut total_tokens = 0_u64;
     let mut tokens_today = 0_u64;
-    let mut tokens_7d = 0_u64;
-    let mut tokens_30d = 0_u64;
+    let mut tokens_week = 0_u64;
+    let mut tokens_month = 0_u64;
     let mut latest_timestamp: Option<i64> = None;
     let mut loaded_count = 0_u32;
     let mut attempted_count = 0_u32;
@@ -402,8 +402,8 @@ fn read_codex_source(
                 loaded_count += 1;
                 total_tokens += snapshot.total_tokens;
                 tokens_today += snapshot.tokens_today;
-                tokens_7d += snapshot.tokens_7d;
-                tokens_30d += snapshot.tokens_30d;
+                tokens_week += snapshot.tokens_week;
+                tokens_month += snapshot.tokens_month;
                 if latest_timestamp.is_none_or(|current| snapshot.latest_timestamp > current) {
                     latest_timestamp = Some(snapshot.latest_timestamp);
                 }
@@ -437,8 +437,8 @@ fn read_codex_source(
         available: true,
         total_tokens,
         tokens_today,
-        tokens_7d,
-        tokens_30d,
+        tokens_week,
+        tokens_month,
         latest_data_at: latest_timestamp.map(|timestamp| iso_from_unix(timestamp, now.offset())),
     })
 }
@@ -446,8 +446,8 @@ fn read_codex_source(
 struct CodexHomeSnapshot {
     total_tokens: u64,
     tokens_today: u64,
-    tokens_7d: u64,
-    tokens_30d: u64,
+    tokens_week: u64,
+    tokens_month: u64,
     latest_timestamp: i64,
 }
 
@@ -462,7 +462,7 @@ fn read_single_codex_home(
     let db_path = find_latest_state_db(codex_home)?;
     let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("Failed to open Codex database {}", db_path.display()))?;
-    let window = day_window(now);
+    let window = calendar_window(now);
 
     let total_tokens: u64 = db
         .query_row(
@@ -473,7 +473,7 @@ fn read_single_codex_home(
         .context("Failed to query Codex total tokens")?
         .max(0) as u64;
 
-    let (tokens_today, tokens_7d, tokens_30d): (u64, u64, u64) = db
+    let (tokens_today, tokens_week, tokens_month): (u64, u64, u64) = db
         .query_row(
             "
             SELECT
@@ -484,8 +484,8 @@ fn read_single_codex_home(
             ",
             (
                 window.today_start.timestamp(),
-                window.day7_start.timestamp(),
-                window.day30_start.timestamp(),
+                window.week_start.timestamp(),
+                window.month_start.timestamp(),
             ),
             |row| {
                 Ok((
@@ -507,8 +507,8 @@ fn read_single_codex_home(
     Ok(CodexHomeSnapshot {
         total_tokens,
         tokens_today,
-        tokens_7d,
-        tokens_30d,
+        tokens_week,
+        tokens_month,
         latest_timestamp,
     })
 }
@@ -556,8 +556,8 @@ fn read_claude_source(
         available: true,
         total_tokens: aggregate.total_tokens,
         tokens_today: aggregate.tokens_today,
-        tokens_7d: aggregate.tokens_7d,
-        tokens_30d: aggregate.tokens_30d,
+        tokens_week: aggregate.tokens_week,
+        tokens_month: aggregate.tokens_month,
         latest_data_at: aggregate.latest_data_at,
     })
 }
@@ -578,7 +578,7 @@ fn read_claude_stats_baseline(
 
     let parsed: ClaudeStatsFile =
         serde_json::from_str(&raw).context("Failed to parse Claude stats JSON")?;
-    let window = day_window(now);
+    let window = calendar_window(now);
     let mut baseline = ClaudeBaseline {
         last_computed_date: parsed
             .last_computed_date
@@ -708,7 +708,7 @@ fn read_claude_project_usage(
         }
     }
 
-    let window = day_window(now);
+    let window = calendar_window(now);
     let mut aggregate = ClaudeAggregate::default();
 
     for entry in entries.values() {
@@ -774,8 +774,8 @@ fn collect_jsonl_files_recursive(root: &Path, files: &mut Vec<PathBuf>) -> Resul
 fn merge_claude_aggregate(target: &mut ClaudeAggregate, extra: &ClaudeAggregate) {
     target.total_tokens += extra.total_tokens;
     target.tokens_today += extra.tokens_today;
-    target.tokens_7d += extra.tokens_7d;
-    target.tokens_30d += extra.tokens_30d;
+    target.tokens_week += extra.tokens_week;
+    target.tokens_month += extra.tokens_month;
     update_latest_iso(&mut target.latest_data_at, extra.latest_data_at.clone());
 }
 
@@ -791,16 +791,16 @@ fn accumulate_claude_usage(
     aggregate: &mut ClaudeAggregate,
     usage_tokens: u64,
     day: NaiveDate,
-    window: &DayWindow,
+    window: &CalendarWindow,
 ) {
     if day == window.today_start.date_naive() {
         aggregate.tokens_today += usage_tokens;
     }
-    if day >= window.day7_start.date_naive() {
-        aggregate.tokens_7d += usage_tokens;
+    if day >= window.week_start.date_naive() {
+        aggregate.tokens_week += usage_tokens;
     }
-    if day >= window.day30_start.date_naive() {
-        aggregate.tokens_30d += usage_tokens;
+    if day >= window.month_start.date_naive() {
+        aggregate.tokens_month += usage_tokens;
     }
 }
 
@@ -868,7 +868,7 @@ fn file_modified_ms(path: Option<&Path>) -> Result<Option<u128>> {
 fn write_cache(
     cache_path: &Path,
     signatures: &SourceSignatures,
-    snapshot: &PanelSnapshotV1,
+    snapshot: &PanelSnapshotV2,
     now: DateTime<FixedOffset>,
 ) -> Result<()> {
     if let Some(parent) = cache_path.parent() {
@@ -1050,27 +1050,31 @@ fn iso_from_day(day: &str, offset: &FixedOffset) -> Option<String> {
     )
 }
 
-struct DayWindow {
+struct CalendarWindow {
     today_start: DateTime<FixedOffset>,
-    day7_start: DateTime<FixedOffset>,
-    day30_start: DateTime<FixedOffset>,
+    week_start: DateTime<FixedOffset>,
+    month_start: DateTime<FixedOffset>,
 }
 
-fn day_window(now: DateTime<FixedOffset>) -> DayWindow {
-    let start_naive = now
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .expect("valid midnight timestamp");
-    let today_start = now
-        .offset()
+fn start_of_day(day: NaiveDate, offset: &FixedOffset) -> DateTime<FixedOffset> {
+    let start_naive = day.and_hms_opt(0, 0, 0).expect("valid midnight timestamp");
+
+    offset
         .from_local_datetime(&start_naive)
         .single()
-        .expect("fixed offset midnight");
+        .expect("fixed offset midnight")
+}
 
-    DayWindow {
-        today_start,
-        day7_start: today_start - Duration::days(6),
-        day30_start: today_start - Duration::days(29),
+fn calendar_window(now: DateTime<FixedOffset>) -> CalendarWindow {
+    let today = now.date_naive();
+    let week_start_day = today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
+    let month_start_day =
+        NaiveDate::from_ymd_opt(today.year(), today.month(), 1).expect("valid month start");
+
+    CalendarWindow {
+        today_start: start_of_day(today, now.offset()),
+        week_start: start_of_day(week_start_day, now.offset()),
+        month_start: start_of_day(month_start_day, now.offset()),
     }
 }
 
@@ -1097,13 +1101,24 @@ mod tests {
         DateTime::parse_from_rfc3339("2026-03-22T12:00:00+08:00").expect("valid timestamp")
     }
 
+    #[test]
+    fn calendar_window_uses_midnight_monday_and_month_start() {
+        let now =
+            DateTime::parse_from_rfc3339("2026-06-20T18:30:00+08:00").expect("valid timestamp");
+        let window = calendar_window(now);
+
+        assert_eq!(window.today_start.to_rfc3339(), "2026-06-20T00:00:00+08:00");
+        assert_eq!(window.week_start.to_rfc3339(), "2026-06-15T00:00:00+08:00");
+        assert_eq!(window.month_start.to_rfc3339(), "2026-06-01T00:00:00+08:00");
+    }
+
     fn build_test_paths(root: &TempDir) -> BuildPaths {
         BuildPaths {
             codex_home: root.path().join(".codex"),
             extra_codex_homes: Vec::new(),
             claude_stats_path: root.path().join(".claude").join("stats-cache.json"),
             claude_projects_path: root.path().join(".claude").join("projects"),
-            cache_path: root.path().join(".cache").join("panel-snapshot-v1.json"),
+            cache_path: root.path().join(".cache").join("panel-snapshot-v2.json"),
         }
     }
 
@@ -1299,8 +1314,8 @@ mod tests {
         assert_eq!(snapshot.total_tokens, 460);
         assert_eq!(snapshot.formatted_total_tokens, "460");
         assert_eq!(snapshot.tokens_today, 250);
-        assert_eq!(snapshot.tokens_7d, 390);
-        assert_eq!(snapshot.tokens_30d, 400);
+        assert_eq!(snapshot.tokens_week, 390);
+        assert_eq!(snapshot.tokens_month, 400);
         assert_eq!(snapshot.available_source_count, 2);
         assert_eq!(snapshot.unavailable_source_count, 0);
         assert_eq!(snapshot.status, SnapshotStatus::Ok);
@@ -1342,8 +1357,8 @@ mod tests {
 
         assert_eq!(snapshot.total_tokens, 520);
         assert_eq!(snapshot.tokens_today, 290);
-        assert_eq!(snapshot.tokens_7d, 450);
-        assert_eq!(snapshot.tokens_30d, 460);
+        assert_eq!(snapshot.tokens_week, 450);
+        assert_eq!(snapshot.tokens_month, 460);
         assert_eq!(snapshot.sources[0].total_tokens, 360);
 
         Ok(())
@@ -1360,7 +1375,7 @@ mod tests {
 
         assert_eq!(snapshot.total_tokens, 1_000);
         assert_eq!(snapshot.tokens_today, 900);
-        assert_eq!(snapshot.tokens_7d, 1_000);
+        assert_eq!(snapshot.tokens_week, 1_000);
 
         Ok(())
     }
@@ -1422,8 +1437,8 @@ mod tests {
 
         assert_eq!(snapshot.total_tokens, 210);
         assert_eq!(snapshot.tokens_today, 30);
-        assert_eq!(snapshot.tokens_7d, 140);
-        assert_eq!(snapshot.tokens_30d, 150);
+        assert_eq!(snapshot.tokens_week, 50);
+        assert_eq!(snapshot.tokens_month, 150);
         assert_eq!(
             snapshot.latest_data_at.as_deref(),
             Some("2026-03-24T09:00:00+08:00")
@@ -1517,8 +1532,8 @@ mod tests {
 
         assert_eq!(snapshot.total_tokens, 40);
         assert_eq!(snapshot.tokens_today, 25);
-        assert_eq!(snapshot.tokens_7d, 40);
-        assert_eq!(snapshot.tokens_30d, 40);
+        assert_eq!(snapshot.tokens_week, 40);
+        assert_eq!(snapshot.tokens_month, 40);
         assert_eq!(
             snapshot.latest_data_at.as_deref(),
             Some("2026-03-22T09:00:00+08:00")
