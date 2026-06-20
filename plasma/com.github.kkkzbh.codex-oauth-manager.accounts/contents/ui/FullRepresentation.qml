@@ -193,10 +193,283 @@ QQC2.Control {
                     }
                 }
 
-                // Spacer aligning with the per-account action column below.
                 Item {
+                    id: resetCreditsAnchor
+
                     Layout.preferredWidth: fullRoot.actionsColumnWidth
+                    Layout.maximumWidth: fullRoot.actionsColumnWidth
                     Layout.fillHeight: true
+                    Layout.alignment: Qt.AlignVCenter
+
+                    QQC2.Button {
+                        id: resetCreditsButton
+
+                        property bool popupVisibleOnPress: false
+
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
+                        enabled: resetCreditsPopup.visible
+                            || (fullRoot.rootItem.currentAccount !== null
+                                && !fullRoot.rootItem.actionInFlight)
+                        text: fullRoot.rootItem.resetCreditButtonText(fullRoot.rootItem.currentAccount)
+                        icon.name: "view-calendar"
+                        display: QQC2.AbstractButton.TextBesideIcon
+                        onPressed: popupVisibleOnPress = resetCreditsPopup.visible
+                        onClicked: {
+                            if (popupVisibleOnPress) {
+                                resetCreditsPopup.close();
+                                popupVisibleOnPress = false;
+                                return;
+                            }
+
+                            const key = fullRoot.rootItem.accountKey(fullRoot.rootItem.currentAccount);
+                            if (key.length === 0) {
+                                return;
+                            }
+                            resetCreditsPopup.open();
+                            fullRoot.rootItem.queryResetCredits(key);
+                        }
+                    }
+
+                    QQC2.Popup {
+                        id: resetCreditsPopup
+
+                        width: Kirigami.Units.gridUnit * 18.5
+                        x: parent.width - width
+                        y: resetCreditsButton.y + resetCreditsButton.height + Kirigami.Units.smallSpacing
+                        leftPadding: Kirigami.Units.largeSpacing * 0.8
+                        rightPadding: Kirigami.Units.largeSpacing * 0.8
+                        topPadding: Kirigami.Units.largeSpacing
+                        bottomPadding: Kirigami.Units.largeSpacing * 0.8
+                        modal: false
+                        focus: true
+                        closePolicy: QQC2.Popup.CloseOnEscape | QQC2.Popup.CloseOnPressOutsideParent
+
+                        background: Item {
+                            Rectangle {
+                                id: resetPopupNotch
+
+                                width: Kirigami.Units.gridUnit * 0.65
+                                height: width
+                                x: Math.max(Kirigami.Units.largeSpacing,
+                                            Math.min(parent.width - width - Kirigami.Units.largeSpacing,
+                                                     parent.width - resetCreditsButton.width / 2 - width / 2))
+                                y: Kirigami.Units.smallSpacing * 0.5
+                                rotation: 45
+                                radius: Kirigami.Units.smallSpacing / 2
+                                color: Qt.rgba(1.0, 0.985, 0.94, 0.98)
+                                border.width: 1
+                                border.color: Qt.rgba(Kirigami.Theme.textColor.r,
+                                                      Kirigami.Theme.textColor.g,
+                                                      Kirigami.Theme.textColor.b, 0.16)
+                            }
+
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.topMargin: Kirigami.Units.smallSpacing
+                                radius: Kirigami.Units.gridUnit * 0.65
+                                color: Qt.rgba(1.0, 0.985, 0.94, 0.98)
+                                border.width: 1
+                                border.color: Qt.rgba(Kirigami.Theme.textColor.r,
+                                                      Kirigami.Theme.textColor.g,
+                                                      Kirigami.Theme.textColor.b, 0.16)
+                            }
+                        }
+
+                        contentItem: ColumnLayout {
+                            spacing: Kirigami.Units.smallSpacing
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: Kirigami.Units.smallSpacing / 2
+
+                                PlasmaComponents3.Label {
+                                    Layout.fillWidth: true
+                                    text: i18n("Reset expiries")
+                                    color: Qt.rgba(0.03, 0.07, 0.18, 1.0)
+                                    font.weight: Font.DemiBold
+                                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.35)
+                                    elide: Text.ElideRight
+                                }
+
+                                PlasmaComponents3.Label {
+                                    Layout.fillWidth: true
+                                    text: {
+                                        const snapshot = fullRoot.rootItem.currentResetCredits();
+                                        if (!snapshot) {
+                                            return i18n("Live query");
+                                        }
+                                        return snapshot.availableCount === 1
+                                            ? i18n("1 available")
+                                            : i18n("%1 available", snapshot.availableCount);
+                                    }
+                                    color: Qt.rgba(0.32, 0.34, 0.48, 1.0)
+                                    font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 0.98)
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: 1
+                                color: Qt.rgba(0.45, 0.48, 0.66, 0.18)
+                            }
+
+                            PlasmaComponents3.Label {
+                                Layout.fillWidth: true
+                                visible: fullRoot.rootItem.resetCreditsLoading
+                                text: i18n("Checking reset credits…")
+                                opacity: 0.75
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                elide: Text.ElideRight
+                            }
+
+                            PlasmaComponents3.Label {
+                                Layout.fillWidth: true
+                                visible: fullRoot.rootItem.resetCreditsError.length > 0
+                                text: fullRoot.rootItem.resetCreditsError
+                                color: Qt.rgba(0.85, 0.30, 0.24, 1.0)
+                                wrapMode: Text.WordWrap
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            }
+
+                            PlasmaComponents3.Label {
+                                Layout.fillWidth: true
+                                visible: !fullRoot.rootItem.resetCreditsLoading
+                                    && fullRoot.rootItem.resetCreditsError.length === 0
+                                    && (!fullRoot.rootItem.currentResetCredits()
+                                        || !fullRoot.rootItem.currentResetCredits().credits
+                                        || fullRoot.rootItem.currentResetCredits().credits.length === 0)
+                                text: i18n("No reset credits")
+                                opacity: 0.65
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                elide: Text.ElideRight
+                            }
+
+                            Repeater {
+                                model: {
+                                    const snapshot = fullRoot.rootItem.currentResetCredits();
+                                    return snapshot && snapshot.credits ? snapshot.credits : [];
+                                }
+
+                                delegate: Rectangle {
+                                    id: resetCreditDelegate
+
+                                    required property var modelData
+                                    required property int index
+
+                                    readonly property bool creditAvailable: String(resetCreditDelegate.modelData.status || "") === "available"
+
+                                    Layout.fillWidth: true
+                                    radius: Kirigami.Units.gridUnit * 0.42
+                                    implicitHeight: Kirigami.Units.gridUnit * 2.85
+                                    color: resetCreditDelegate.creditAvailable
+                                        ? Qt.rgba(0.93, 0.94, 1.0, 0.78)
+                                        : Qt.rgba(Kirigami.Theme.textColor.r,
+                                                  Kirigami.Theme.textColor.g,
+                                                  Kirigami.Theme.textColor.b, 0.05)
+                                    border.width: 1
+                                    border.color: resetCreditDelegate.creditAvailable
+                                        ? Qt.rgba(0.62, 0.68, 1.0, 0.32)
+                                        : Qt.rgba(Kirigami.Theme.textColor.r,
+                                                  Kirigami.Theme.textColor.g,
+                                                  Kirigami.Theme.textColor.b, 0.08)
+                                    opacity: resetCreditDelegate.creditAvailable ? 1 : 0.65
+
+                                    RowLayout {
+                                        id: resetCreditRow
+
+                                        anchors.fill: parent
+                                        anchors.leftMargin: Kirigami.Units.smallSpacing
+                                        anchors.rightMargin: Kirigami.Units.smallSpacing
+                                        spacing: Kirigami.Units.smallSpacing
+
+                                        Rectangle {
+                                            Layout.preferredWidth: Kirigami.Units.gridUnit * 1.25
+                                            Layout.preferredHeight: width
+                                            Layout.alignment: Qt.AlignVCenter
+                                            radius: width / 2
+                                            color: resetCreditDelegate.creditAvailable
+                                                ? Qt.rgba(0.32, 0.78, 0.58, 0.88)
+                                                : Qt.rgba(0.55, 0.57, 0.66, 0.28)
+                                            border.width: 1
+                                            border.color: resetCreditDelegate.creditAvailable
+                                                ? Qt.rgba(0.23, 0.67, 0.48, 0.72)
+                                                : Qt.rgba(0.45, 0.47, 0.54, 0.24)
+
+                                            PlasmaComponents3.Label {
+                                                anchors.centerIn: parent
+                                                text: resetCreditDelegate.creditAvailable ? "✓" : "?"
+                                                color: "white"
+                                                font.weight: Font.DemiBold
+                                                font.pixelSize: Math.round(parent.height * 0.58)
+                                            }
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            Layout.alignment: Qt.AlignVCenter
+                                            spacing: Kirigami.Units.smallSpacing / 2
+
+                                            PlasmaComponents3.Label {
+                                                Layout.fillWidth: true
+                                                text: i18n("Reset %1", resetCreditDelegate.index + 1)
+                                                color: Qt.rgba(0.03, 0.07, 0.18, 1.0)
+                                                font.weight: Font.DemiBold
+                                                font.pixelSize: Math.round(Kirigami.Theme.defaultFont.pixelSize * 1.05)
+                                                elide: Text.ElideRight
+                                            }
+
+                                            PlasmaComponents3.Label {
+                                                Layout.fillWidth: true
+                                                text: fullRoot.rootItem.resetCreditExpiryText(resetCreditDelegate.modelData)
+                                                color: Qt.rgba(0.34, 0.35, 0.48, 1.0)
+                                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            Layout.preferredWidth: 1
+                                            Layout.preferredHeight: Kirigami.Units.gridUnit * 1.55
+                                            Layout.alignment: Qt.AlignVCenter
+                                            color: Qt.rgba(0.56, 0.62, 0.88, 0.32)
+                                        }
+
+                                        Rectangle {
+                                            Layout.preferredWidth: Kirigami.Units.gridUnit * 5.35
+                                            Layout.preferredHeight: Kirigami.Units.gridUnit * 1.25
+                                            Layout.alignment: Qt.AlignVCenter
+                                            radius: height / 2
+                                            color: Qt.rgba(0.90, 0.98, 0.92, 0.88)
+                                            border.width: 1
+                                            border.color: Qt.rgba(0.35, 0.74, 0.50, 0.42)
+
+                                            RowLayout {
+                                                anchors.centerIn: parent
+                                                spacing: Kirigami.Units.smallSpacing
+
+                                                Kirigami.Icon {
+                                                    Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                                                    Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                                                    source: "chronometer"
+                                                }
+
+                                                PlasmaComponents3.Label {
+                                                    text: fullRoot.rootItem.resetCreditRemainingText(resetCreditDelegate.modelData)
+                                                    color: Qt.rgba(0.10, 0.55, 0.33, 1.0)
+                                                    font.weight: Font.DemiBold
+                                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                                    elide: Text.ElideRight
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -4,8 +4,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use codexbar_collector::accounts::{
     AccountsPaths, AccountsSnapshotOptions, AutoSwitchOptions, activate_account,
-    auto_switch_account, load_accounts_snapshot, remove_account, spawn_account_login,
-    warmup_account,
+    auto_switch_account, load_accounts_snapshot, load_reset_credits, remove_account,
+    spawn_account_login, warmup_account,
 };
 use codexbar_collector::{BuildPaths, SnapshotOptions, load_snapshot};
 
@@ -79,6 +79,7 @@ enum AccountCommand {
     Login(AccountLoginArgs),
     AutoSwitch(AccountAutoSwitchArgs),
     Warmup(AccountWarmupArgs),
+    ResetCredits(AccountResetCreditsArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -112,6 +113,18 @@ struct AccountWarmupArgs {
     #[arg(long)]
     account_key: String,
     #[arg(long, default_value_t = 30)]
+    timeout_seconds: u64,
+}
+
+#[derive(Debug, Parser)]
+struct AccountResetCreditsArgs {
+    #[arg(long, default_value = "json")]
+    format: String,
+    #[arg(long)]
+    codex_home: Option<PathBuf>,
+    #[arg(long)]
+    account_key: String,
+    #[arg(long, default_value_t = 12)]
     timeout_seconds: u64,
 }
 
@@ -229,6 +242,19 @@ fn run() -> anyhow::Result<()> {
                     &paths,
                     &args.account_key,
                     Duration::from_secs(args.timeout_seconds),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
+            AccountCommand::ResetCredits(args) => {
+                if args.format != "json" {
+                    anyhow::bail!("unsupported format: {}", args.format);
+                }
+                let paths = account_paths_from_codex_home(args.codex_home);
+                let result = load_reset_credits(
+                    &paths,
+                    &args.account_key,
+                    Duration::from_secs(args.timeout_seconds),
+                    chrono::Local::now().fixed_offset(),
                 )?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }

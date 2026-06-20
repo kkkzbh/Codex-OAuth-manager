@@ -110,6 +110,12 @@ case "$cmd" in
       --timeout-seconds "$WARMUP_TIMEOUT_SECONDS" \
       "$@"
     ;;
+  reset-credits)
+    exec "$COLLECTOR_PATH" account reset-credits --format json \
+      --codex-home "$CODEX_HOME_PATH" \
+      --timeout-seconds "$FETCH_TIMEOUT_SECONDS" \
+      "$@"
+    ;;
   login)
     if [[ -n "$TERMINAL_COMMAND" ]]; then
       exec "$COLLECTOR_PATH" account login --terminal "$TERMINAL_COMMAND" --command "$LOGIN_COMMAND" "$@"

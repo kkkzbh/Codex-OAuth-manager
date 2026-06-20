@@ -46,14 +46,17 @@ PlasmoidItem {
     readonly property int currentAccountWeeklyPercent: usagePercent(currentAccount, "weekly")
     readonly property string currentAccountSessionLabel: usageLabel(currentAccount, "session")
     readonly property string currentAccountWeeklyLabel: usageLabel(currentAccount, "weekly")
+    readonly property bool resetCreditsLoading: actionInFlight && pendingAction === "reset-credits"
 
     property bool isLoading: true
     property bool actionInFlight: false
     property string errorMessage: ""
+    property string resetCreditsError: ""
     property string pendingAction: ""
     property string pendingSnapshotAccountKey: ""
     property int commandInvocationSerial: 0
     property double lastAutoSwitchAtMs: 0
+    property var resetCreditsByAccount: ({})
     property var activeSnapshot: ({
         generatedAt: "",
         status: "error",
@@ -153,11 +156,17 @@ PlasmoidItem {
         if (actionName === "snapshot-account" || actionName === "snapshot-active") {
             return Math.max(5000, (liveFetchTimeoutSeconds + 5) * 1000);
         }
+        if (actionName === "reset-credits") {
+            return Math.max(5000, (liveFetchTimeoutSeconds + 5) * 1000);
+        }
         return 0;
     }
 
     function timeoutMessage(actionName) {
         const seconds = Math.max(1, Math.round(requestTimeoutMs(actionName) / 1000));
+        if (actionName === "reset-credits") {
+            return i18n("Checking reset credits timed out after %1s", seconds);
+        }
         return i18n("Refreshing account limits timed out after %1s", seconds);
     }
 
@@ -187,8 +196,9 @@ PlasmoidItem {
             + buildBridgeCommand(commandName, extraArgs);
         executable.connectedSources = [];
         executable.connectedSources = ["sh -lc " + shellQuote(invocationCommand)];
-        if (expectSnapshot) {
-            requestWatchdog.interval = requestTimeoutMs(actionName);
+        const timeoutMs = requestTimeoutMs(actionName);
+        if (timeoutMs > 0) {
+            requestWatchdog.interval = timeoutMs;
             requestWatchdog.restart();
         } else {
             requestWatchdog.stop();
@@ -264,6 +274,21 @@ PlasmoidItem {
         // (`onNewData`) then runs `refreshAll(true)`, which re-fetches usage
         // for every account and surfaces the new 5h bar value.
         runCommand("warmup", "warmup", ["--account-key", shellQuote(accountKey)], false, "");
+    }
+
+    function queryResetCredits(accountKey) {
+        const key = String(accountKey || "");
+        if (key.length === 0) {
+            return false;
+        }
+        resetCreditsError = "";
+        return runCommand(
+            "reset-credits",
+            "reset-credits",
+            ["--account-key", shellQuote(key)],
+            false,
+            key
+        );
     }
 
     function maybeAutoSwitch() {
@@ -509,6 +534,33 @@ PlasmoidItem {
         return parsed;
     }
 
+    function parseResetCredits(stdout, expectedAccountKey) {
+        try {
+            const parsed = JSON.parse(stdout);
+            if (!parsed.credits) parsed.credits = [];
+            const targetKey = expectedAccountKey && expectedAccountKey.length > 0
+                ? String(expectedAccountKey)
+                : String(parsed.accountKey || "");
+            if (targetKey.length === 0) {
+                resetCreditsError = i18n("Reset credits response did not include an account");
+                return null;
+            }
+            if (parsed.accountKey && String(parsed.accountKey) !== targetKey) {
+                console.warn("[codexbar-accounts] reset credits account key `" + String(parsed.accountKey)
+                    + "` did not match requested `" + targetKey + "`");
+            }
+            const updated = Object.assign({}, resetCreditsByAccount);
+            updated[targetKey] = parsed;
+            resetCreditsByAccount = updated;
+            resetCreditsError = "";
+            return parsed;
+        } catch (error) {
+            console.log("[codexbar-accounts] invalid reset credits payload", stdout);
+            resetCreditsError = i18n("Invalid reset credits payload");
+            return null;
+        }
+    }
+
     function mergedSnapshotForDisplay(allSnapshotData, activeSnapshotData) {
         const baseSnapshot = snapshotHasAccounts(allSnapshotData)
             ? allSnapshotData
@@ -577,6 +629,67 @@ PlasmoidItem {
         return window
             ? i18n("%1% · %2", window.usedPercent, window.resetsInLabel)
             : "--";
+    }
+
+    function resetCreditCount(account) {
+        if (!account || account.resetCreditCount === undefined || account.resetCreditCount === null) {
+            return -1;
+        }
+        const count = Number(account.resetCreditCount);
+        return Number.isFinite(count) ? count : -1;
+    }
+
+    function resetCreditButtonText(account) {
+        const count = resetCreditCount(account);
+        if (count < 0) {
+            return i18n("Resets");
+        }
+        return count === 1 ? i18n("1 reset") : i18n("%1 resets", count);
+    }
+
+    function resetCreditsForAccount(accountKeyValue) {
+        const key = String(accountKeyValue || "");
+        return key.length > 0 && resetCreditsByAccount[key] ? resetCreditsByAccount[key] : null;
+    }
+
+    function currentResetCredits() {
+        return currentAccount ? resetCreditsForAccount(accountKey(currentAccount)) : null;
+    }
+
+    function resetCreditExpiryText(credit) {
+        if (!credit || !credit.expiresAt) {
+            return i18n("Expiry unknown");
+        }
+        const parsed = new Date(String(credit.expiresAt));
+        if (!Number.isFinite(parsed.getTime())) {
+            return i18n("Expiry unknown");
+        }
+        return Qt.formatDateTime(parsed, "MMM d HH:mm");
+    }
+
+    function resetCreditStatusText(credit) {
+        if (!credit || !credit.status) {
+            return i18n("Status unknown");
+        }
+        const status = String(credit.status);
+        return status.length > 0
+            ? status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " ")
+            : i18n("Status unknown");
+    }
+
+    function resetCreditRemainingText(credit) {
+        if (credit && credit.expiresInLabel) {
+            return i18n("%1 left", credit.expiresInLabel);
+        }
+        return i18n("Expiry unknown");
+    }
+
+    function resetCreditDetailText(credit) {
+        const parts = [resetCreditStatusText(credit)];
+        if (credit && credit.expiresInLabel) {
+            parts.push(resetCreditRemainingText(credit));
+        }
+        return joinSummaryParts(parts);
     }
 
     function logActiveAccountDiagnostics(snapshotData) {
@@ -696,6 +809,9 @@ PlasmoidItem {
 
     function currentAccountSubtitle() {
         if (actionInFlight) {
+            if (pendingAction === "reset-credits") {
+                return i18n("Checking reset credits…");
+            }
             return isFullSnapshotAction(pendingAction)
                 ? i18n("Refreshing all account limits…")
                 : i18n("Refreshing account limits…");
@@ -711,6 +827,9 @@ PlasmoidItem {
 
     function footerStatusText() {
         if (actionInFlight) {
+            if (pendingAction === "reset-credits") {
+                return i18n("Checking reset credits…");
+            }
             return isFullSnapshotAction(pendingAction)
                 ? i18n("Refreshing all account limits…")
                 : i18n("Refreshing account limits…");
@@ -770,6 +889,13 @@ PlasmoidItem {
             root.clearRequestState();
 
             if (exitCode !== 0) {
+                if (action === "reset-credits") {
+                    root.resetCreditsError = stderr.length > 0
+                        ? stderr.trim()
+                        : i18n("Reset credits query failed");
+                    root.isLoading = false;
+                    return;
+                }
                 root.errorMessage = stderr.length > 0 ? stderr.trim() : i18n("Command failed");
                 root.isLoading = false;
                 return;
@@ -785,6 +911,11 @@ PlasmoidItem {
 
             if (action === "snapshot-account") {
                 root.parseSingleAccountSnapshot(stdout, snapshotAccountKey);
+                return;
+            }
+
+            if (action === "reset-credits") {
+                root.parseResetCredits(stdout, snapshotAccountKey);
                 return;
             }
 
@@ -823,7 +954,11 @@ PlasmoidItem {
             const action = root.pendingAction;
             console.warn("[codexbar-accounts] request watchdog fired for `" + action + "`");
             executable.connectedSources = [];
-            root.errorMessage = root.timeoutMessage(action);
+            if (action === "reset-credits") {
+                root.resetCreditsError = root.timeoutMessage(action);
+            } else {
+                root.errorMessage = root.timeoutMessage(action);
+            }
             root.isLoading = false;
             root.clearRequestState();
         }

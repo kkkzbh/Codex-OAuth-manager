@@ -16,6 +16,8 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
 const USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+const RESET_CREDITS_ENDPOINT: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CHATGPT_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -156,6 +158,8 @@ pub struct AccountUsageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weekly: Option<UsageWindowSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_credit_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -191,6 +195,33 @@ pub struct AccountActionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_key: Option<String>,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCreditsSnapshot {
+    pub generated_at: String,
+    pub account_key: String,
+    pub available_count: u32,
+    pub total_earned_count: u32,
+    pub credits: Vec<ResetCreditSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCreditSnapshot {
+    pub id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -353,6 +384,8 @@ struct LiveUsageResponse {
     plan_type: Option<String>,
     #[serde(default)]
     rate_limit: Option<LiveRateLimit>,
+    #[serde(default)]
+    rate_limit_reset_credits: Option<LiveResetCredits>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -370,6 +403,38 @@ struct LiveWindow {
     limit_window_seconds: u32,
     #[serde(default)]
     reset_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LiveResetCredits {
+    #[serde(default)]
+    available_count: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ResetCreditsResponse {
+    #[serde(default)]
+    credits: Vec<ResetCreditResponse>,
+    #[serde(default)]
+    available_count: u32,
+    #[serde(default)]
+    total_earned_count: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ResetCreditResponse {
+    id: String,
+    status: String,
+    #[serde(default)]
+    reset_type: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    granted_at: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -594,6 +659,96 @@ pub fn warmup_account(
         account_key: Some(account_key.to_string()),
         message: format!("Warm-up request sent for {account_key}"),
     })
+}
+
+pub fn load_reset_credits(
+    paths: &AccountsPaths,
+    account_key: &str,
+    timeout: StdDuration,
+    now: DateTime<FixedOffset>,
+) -> Result<ResetCreditsSnapshot> {
+    let mut registry = read_or_init_registry(&paths.registry_path)?;
+    sync_current_auth_into_registry(paths, &mut registry)?;
+    let registry_account = registry
+        .accounts
+        .iter()
+        .find(|account| account.account_key == account_key)
+        .cloned()
+        .with_context(|| format!("Unknown account key: {account_key}"))?;
+    let account_id = registry_account
+        .chatgpt_account_id
+        .clone()
+        .ok_or_else(|| anyhow!("Account {account_key} is missing chatgptAccountId"))?;
+
+    let auth_files = discover_auth_files(&paths.accounts_dir)?;
+    let (auth_path, mut auth_file) = auth_files
+        .get(&account_id)
+        .cloned()
+        .with_context(|| format!("Missing auth file for account {account_key}"))?;
+
+    let client = build_http_client(timeout)?;
+    let mut response =
+        fetch_reset_credits_with_access_token(&client, &auth_file, Some(account_id.as_str()))?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        refresh_auth_tokens(&client, &mut auth_file)?;
+        let bytes = serde_json::to_vec_pretty(&auth_file)
+            .context("Failed to serialize refreshed auth file")?;
+        atomic_write(&auth_path, &bytes)?;
+        response =
+            fetch_reset_credits_with_access_token(&client, &auth_file, Some(account_id.as_str()))?;
+    }
+
+    let status = response.status();
+    if !status.is_success() {
+        bail!("{}", reset_credits_status_message(status));
+    }
+
+    let payload: ResetCreditsResponse = response
+        .json()
+        .context("Failed to decode reset credits response")?;
+    Ok(reset_credits_response_to_snapshot(
+        account_key,
+        payload,
+        now,
+    ))
+}
+
+fn fetch_reset_credits_with_access_token(
+    client: &Client,
+    auth_file: &AuthFile,
+    chatgpt_account_id: Option<&str>,
+) -> Result<reqwest::blocking::Response> {
+    let access_token = auth_file
+        .tokens
+        .access_token
+        .as_deref()
+        .ok_or_else(|| anyhow!("Auth file is missing access_token"))?;
+    let mut request = client
+        .get(RESET_CREDITS_ENDPOINT)
+        .bearer_auth(access_token)
+        .header("Accept", "application/json")
+        .header("originator", "Codex Desktop")
+        .header("OAI-Product-Sku", "CODEX");
+    if let Some(id) = chatgpt_account_id {
+        request = request.header("ChatGPT-Account-Id", id);
+    }
+    request
+        .send()
+        .context("Failed to query reset credits endpoint")
+}
+
+fn reset_credits_status_message(status: StatusCode) -> String {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            format!(
+                "Reset credits endpoint rejected the saved Codex login ({status}). Open Codex Desktop and sign in again."
+            )
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            format!("Reset credits endpoint rate-limited the query ({status}). Try again later.")
+        }
+        _ => format!("Reset credits endpoint returned {status}"),
+    }
 }
 
 fn send_responses_warmup(
@@ -1261,6 +1416,10 @@ fn fetch_live_usage_for_account(
             last_usage_at: Some(generated_at),
             session,
             weekly,
+            reset_credit_count: payload
+                .rate_limit_reset_credits
+                .as_ref()
+                .map(|credits| credits.available_count),
             error: None,
         },
         auth_file,
@@ -1410,6 +1569,7 @@ fn build_fallback_snapshot(
         last_usage_at,
         session,
         weekly,
+        reset_credit_count: None,
         error,
     }
 }
@@ -1510,6 +1670,55 @@ fn registry_window_to_snapshot(
         window_minutes: window.window_minutes,
         resets_at: reset_at.to_rfc3339(),
         resets_in_label: format_reset_label(now, reset_at),
+    }
+}
+
+fn reset_credits_response_to_snapshot(
+    account_key: &str,
+    response: ResetCreditsResponse,
+    now: DateTime<FixedOffset>,
+) -> ResetCreditsSnapshot {
+    let mut credits = response
+        .credits
+        .into_iter()
+        .map(|credit| reset_credit_response_to_snapshot(credit, now))
+        .collect::<Vec<_>>();
+    credits.sort_by(|left, right| {
+        let left_expires = left.expires_at.as_deref().and_then(parse_datetime);
+        let right_expires = right.expires_at.as_deref().and_then(parse_datetime);
+        match (left_expires, right_expires) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.id.cmp(&right.id),
+        }
+    });
+    ResetCreditsSnapshot {
+        generated_at: now.to_rfc3339(),
+        account_key: account_key.to_string(),
+        available_count: response.available_count,
+        total_earned_count: response.total_earned_count,
+        credits,
+    }
+}
+
+fn reset_credit_response_to_snapshot(
+    credit: ResetCreditResponse,
+    now: DateTime<FixedOffset>,
+) -> ResetCreditSnapshot {
+    let expires_at = credit.expires_at;
+    let expires_in_label = expires_at
+        .as_deref()
+        .and_then(parse_datetime)
+        .map(|expires| format_reset_label(now, expires));
+    ResetCreditSnapshot {
+        id: credit.id,
+        status: credit.status,
+        reset_type: credit.reset_type,
+        title: credit.title,
+        granted_at: credit.granted_at,
+        expires_at,
+        expires_in_label,
     }
 }
 
@@ -1746,6 +1955,7 @@ mod tests {
                     resets_at: (now + Duration::days(7)).to_rfc3339(),
                     resets_in_label: "in 7d".to_string(),
                 }),
+                reset_credit_count: None,
                 error: None,
             },
             failure_count: 0,
@@ -1856,6 +2066,112 @@ mod tests {
         assert_eq!(
             content[0].get("text").and_then(|value| value.as_str()),
             Some(WARMUP_PROMPT)
+        );
+    }
+
+    #[test]
+    fn reset_credits_response_sorts_and_formats_expiry_labels() -> Result<()> {
+        let now = DateTime::parse_from_rfc3339("2026-06-20T00:00:00+00:00")?;
+        let response: ResetCreditsResponse = serde_json::from_value(serde_json::json!({
+            "available_count": 2,
+            "total_earned_count": 2,
+            "credits": [
+                {
+                    "id": "later",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "title": "One free rate limit reset",
+                    "granted_at": "2026-06-18T00:00:00Z",
+                    "expires_at": "2026-06-21T00:00:00Z"
+                },
+                {
+                    "id": "sooner",
+                    "reset_type": "codex_rate_limits",
+                    "status": "available",
+                    "title": "One free rate limit reset",
+                    "granted_at": "2026-06-19T00:00:00Z",
+                    "expires_at": "2026-06-20T02:30:00Z"
+                }
+            ]
+        }))?;
+
+        let snapshot = reset_credits_response_to_snapshot("user-a::acct-1", response, now);
+
+        assert_eq!(snapshot.account_key, "user-a::acct-1");
+        assert_eq!(snapshot.available_count, 2);
+        assert_eq!(snapshot.total_earned_count, 2);
+        assert_eq!(
+            snapshot
+                .credits
+                .iter()
+                .map(|credit| credit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sooner", "later"]
+        );
+        assert_eq!(
+            snapshot.credits[0].expires_in_label.as_deref(),
+            Some("2h 30m")
+        );
+        assert_eq!(
+            snapshot.credits[1].expires_in_label.as_deref(),
+            Some("1d 0h")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn live_usage_response_extracts_reset_credit_count() -> Result<()> {
+        let payload: LiveUsageResponse = serde_json::from_value(serde_json::json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 20,
+                    "limit_window_seconds": 18000,
+                    "reset_at": 1775649600
+                }
+            },
+            "rate_limit_reset_credits": {
+                "available_count": 2
+            }
+        }))?;
+
+        assert_eq!(
+            payload
+                .rate_limit_reset_credits
+                .as_ref()
+                .map(|credits| credits.available_count),
+            Some(2)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_reset_credits_rejects_unknown_account_key_before_network() -> Result<()> {
+        let root = TempDir::new()?;
+        create_fixture(&root)?;
+
+        let error = load_reset_credits(
+            &test_paths(&root),
+            "missing::account",
+            StdDuration::from_secs(1),
+            test_now(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Unknown account key: missing::account")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reset_credits_status_messages_are_actionable() {
+        assert!(reset_credits_status_message(StatusCode::UNAUTHORIZED).contains("sign in again"));
+        assert!(reset_credits_status_message(StatusCode::FORBIDDEN).contains("saved Codex login"));
+        assert!(
+            reset_credits_status_message(StatusCode::TOO_MANY_REQUESTS).contains("rate-limited")
         );
     }
 
@@ -2004,6 +2320,7 @@ mod tests {
                             last_usage_at: Some(test_now().to_rfc3339()),
                             session: None,
                             weekly: None,
+                            reset_credit_count: None,
                             error: None,
                         },
                         failure_count: 0,
