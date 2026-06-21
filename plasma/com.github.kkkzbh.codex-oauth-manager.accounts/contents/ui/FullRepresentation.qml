@@ -52,6 +52,16 @@ QQC2.Control {
     Layout.preferredHeight: _popupHeight
     Layout.maximumHeight: _popupHeight
 
+    Connections {
+        target: fullRoot.rootItem
+
+        function onExpandedChanged() {
+            if (!fullRoot.rootItem.expanded && resetCreditsPopup.visible) {
+                resetCreditsPopup.close();
+            }
+        }
+    }
+
     contentItem: ColumnLayout {
         id: contentLayout
 
