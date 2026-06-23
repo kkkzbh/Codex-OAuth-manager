@@ -1,6 +1,6 @@
 # Codex OAuth Manager
 
-`Codex OAuth Manager` 是一个运行在 `Linux + KDE Plasma 6` 上的 Codex 多账号额度查看与切换组件。  
+`Codex OAuth Manager` 是一个运行在 `Linux + KDE Plasma 6` 上的 Codex 多账号额度查看、切换与本地 token 汇总组件。
 安装完成后，你需要在 Plasma 小组件列表里添加的实际名称仍然是 `CodexBar Accounts`。
 
 ## 预览
@@ -15,7 +15,7 @@ _折叠状态下的 `CodexBar Accounts` 组件外观。_
 
 ![Accounts 展开面板](展开面板.png)
 
-_展开后可以查看多个账号的 5 小时 / 1 周额度，并执行刷新、添加账号和切换账号。_
+_展开后可以查看当前账号额度、本地 token 汇总和其他账号的 5 小时 / 1 周额度，并执行刷新、添加账号和切换账号。_
 
 ## 适用系统
 
@@ -57,14 +57,17 @@ curl -fsSL https://github.com/kkkzbh/Codex-OAuth-manager/releases/latest/downloa
 点击组件后会展开详情面板，你可以看到：
 
 - 当前账号的 `5h` 和 `1w` 使用比例
+- 当前账号区域内的本地 token 总量、今日、本周和本月汇总
 - 多个账号的额度列表
 - 每个账号当前是实时数据还是缓存数据
+
+`Accounts` 列表只显示非当前账号；当前账号的信息和操作集中在 `Current account` 区域。
 
 ### 3. 刷新账号额度
 
 在账号列表中点击某一行的刷新按钮，可以单独刷新该账号的额度信息。
 
-点击展开面板右下角的 `Refresh all`，可以立即刷新所有账号的额度信息。
+点击展开面板右下角的 `Refresh all`，可以立即刷新所有账号的额度信息和本地 token 汇总。
 
 ### 4. 添加新账号
 
@@ -92,6 +95,7 @@ codex login
 - `Terminal command`：用于拉起登录终端的命令模板
 - `Login command`：默认是 `codex login`
 - `Refresh interval`：刷新频率
+- `Token refresh interval`：本地 token 汇总刷新频率
 - `Enable auto switch`：是否启用自动切换账号
 - `Auto-switch 5h threshold`：5 小时额度自动切换阈值
 - `Auto-switch 1w threshold`：1 周额度自动切换阈值

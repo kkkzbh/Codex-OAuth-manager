@@ -5,6 +5,7 @@ LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/codexbar"
 LOG_FILE="$LOG_DIR/accounts-plasmoid-bridge.log"
 COLLECTOR_PATH="${COLLECTOR_PATH:-$HOME/.local/bin/codexbar-collector}"
 REFRESH_INTERVAL_SECONDS="${REFRESH_INTERVAL_SECONDS:-120}"
+TOKEN_TTL_SECONDS="${TOKEN_TTL_SECONDS:-3}"
 SOFT_TTL_SECONDS="${SOFT_TTL_SECONDS:-60}"
 HARD_TTL_SECONDS="${HARD_TTL_SECONDS:-900}"
 FETCH_TIMEOUT_SECONDS="${FETCH_TIMEOUT_SECONDS:-12}"
@@ -97,6 +98,12 @@ case "$cmd" in
       --hard-ttl-seconds "$HARD_TTL_SECONDS" \
       --timeout-seconds "$FETCH_TIMEOUT_SECONDS" \
       --concurrency "$FETCH_CONCURRENCY" \
+      "$@"
+    ;;
+  token-snapshot)
+    exec "$COLLECTOR_PATH" snapshot --format json \
+      --codex-home "$CODEX_HOME_PATH" \
+      --ttl-seconds "$TOKEN_TTL_SECONDS" \
       "$@"
     ;;
   activate)

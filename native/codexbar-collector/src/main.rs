@@ -33,8 +33,6 @@ struct SnapshotArgs {
     #[arg(long)]
     extra_codex_home: Vec<PathBuf>,
     #[arg(long)]
-    claude_stats_path: Option<PathBuf>,
-    #[arg(long)]
     cache_path: Option<PathBuf>,
     #[arg(long, default_value_t = 15)]
     ttl_seconds: u64,
@@ -170,9 +168,6 @@ fn run() -> anyhow::Result<()> {
             }
             if !args.extra_codex_home.is_empty() {
                 paths.extra_codex_homes.extend(args.extra_codex_home);
-            }
-            if let Some(path) = args.claude_stats_path {
-                paths.claude_stats_path = path;
             }
             if let Some(path) = args.cache_path {
                 paths.cache_path = path;

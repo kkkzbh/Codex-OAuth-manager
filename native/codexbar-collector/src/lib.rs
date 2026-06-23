@@ -1,9 +1,6 @@
 pub mod accounts;
 
-use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, UNIX_EPOCH};
 
@@ -26,8 +23,6 @@ pub struct SnapshotOptions {
 pub struct BuildPaths {
     pub codex_home: PathBuf,
     pub extra_codex_homes: Vec<PathBuf>,
-    pub claude_stats_path: PathBuf,
-    pub claude_projects_path: PathBuf,
     pub cache_path: PathBuf,
 }
 
@@ -73,7 +68,6 @@ pub enum SnapshotStatus {
 #[serde(rename_all = "snake_case")]
 pub enum SourceId {
     Codex,
-    ClaudeCode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -82,9 +76,6 @@ struct SourceSignatures {
     codex_db_mtime_ms: Option<u128>,
     #[serde(default)]
     extra_codex_db_signatures: Vec<CodexDbSignature>,
-    claude_stats_mtime_ms: Option<u128>,
-    #[serde(default)]
-    claude_projects: ClaudeProjectsSignature,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -92,13 +83,6 @@ struct SourceSignatures {
 struct CodexDbSignature {
     path: String,
     mtime_ms: Option<u128>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeProjectsSignature {
-    latest_jsonl_mtime_ms: Option<u128>,
-    jsonl_file_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,103 +103,6 @@ struct SourceSnapshot {
     tokens_week: u64,
     tokens_month: u64,
     latest_data_at: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeStatsFile {
-    #[serde(default)]
-    last_computed_date: Option<String>,
-    #[serde(default)]
-    daily_model_tokens: Vec<ClaudeDailyRow>,
-    #[serde(default)]
-    model_usage: HashMap<String, ClaudeModelUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeDailyRow {
-    #[serde(default)]
-    date: Option<String>,
-    #[serde(default)]
-    tokens_by_model: HashMap<String, u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeModelUsage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    cache_read_input_tokens: u64,
-    #[serde(default)]
-    cache_creation_input_tokens: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeProjectEvent {
-    #[serde(default)]
-    message: Option<ClaudeProjectMessage>,
-    #[serde(default)]
-    request_id: Option<String>,
-    #[serde(default)]
-    uuid: Option<String>,
-    #[serde(default)]
-    timestamp: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeProjectMessage {
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    usage: Option<ClaudeProjectUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeProjectUsage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    cache_read_input_tokens: u64,
-    #[serde(default)]
-    cache_creation_input_tokens: u64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ClaudeAggregate {
-    total_tokens: u64,
-    tokens_today: u64,
-    tokens_week: u64,
-    tokens_month: u64,
-    latest_data_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ClaudeBaseline {
-    aggregate: ClaudeAggregate,
-    last_computed_date: Option<NaiveDate>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct ClaudeProjectScan {
-    aggregate: ClaudeAggregate,
-    latest_data_at: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ClaudeProjectUsageEntry {
-    usage_tokens: u64,
-    timestamp: String,
-    day: NaiveDate,
 }
 
 impl SnapshotOptions {
@@ -245,8 +132,6 @@ impl Default for BuildPaths {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir.join(".codex")),
             extra_codex_homes: default_extra_codex_homes(),
-            claude_stats_path: home_dir.join(".claude").join("stats-cache.json"),
-            claude_projects_path: home_dir.join(".claude").join("projects"),
             cache_path: cache_root.join("codexbar").join("panel-snapshot-v2.json"),
         }
     }
@@ -297,13 +182,6 @@ pub fn build_fresh_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV2
         read_codex_source(
             &options.paths.codex_home,
             &options.paths.extra_codex_homes,
-            options.now,
-        )
-    }));
-    sources.push(read_source_safely(SourceId::ClaudeCode, || {
-        read_claude_source(
-            &options.paths.claude_stats_path,
-            &options.paths.claude_projects_path,
             options.now,
         )
     }));
@@ -513,319 +391,12 @@ fn read_single_codex_home(
     })
 }
 
-fn read_claude_source(
-    stats_path: &Path,
-    projects_path: &Path,
-    now: DateTime<FixedOffset>,
-) -> Result<SourceSnapshot> {
-    let baseline = read_claude_stats_baseline(stats_path, now);
-    let project_cutoff = baseline
-        .as_ref()
-        .ok()
-        .and_then(|snapshot| snapshot.last_computed_date);
-    let project_scan = read_claude_project_usage(projects_path, now, project_cutoff);
-
-    let mut available_inputs = 0_u32;
-    let mut errors = Vec::new();
-    let mut aggregate = ClaudeAggregate::default();
-
-    match baseline {
-        Ok(snapshot) => {
-            available_inputs += 1;
-            merge_claude_aggregate(&mut aggregate, &snapshot.aggregate);
-        }
-        Err(error) => errors.push(error.to_string()),
-    }
-
-    match project_scan {
-        Ok(scan) => {
-            available_inputs += 1;
-            merge_claude_aggregate(&mut aggregate, &scan.aggregate);
-            update_latest_iso(&mut aggregate.latest_data_at, scan.latest_data_at);
-        }
-        Err(error) => errors.push(error.to_string()),
-    }
-
-    if available_inputs == 0 {
-        bail!("{}", errors.join("; "));
-    }
-
-    Ok(SourceSnapshot {
-        id: SourceId::ClaudeCode,
-        label: SourceId::ClaudeCode.label(),
-        available: true,
-        total_tokens: aggregate.total_tokens,
-        tokens_today: aggregate.tokens_today,
-        tokens_week: aggregate.tokens_week,
-        tokens_month: aggregate.tokens_month,
-        latest_data_at: aggregate.latest_data_at,
-    })
-}
-
-fn read_claude_stats_baseline(
-    stats_path: &Path,
-    now: DateTime<FixedOffset>,
-) -> Result<ClaudeBaseline> {
-    if !stats_path.exists() {
-        bail!("Claude stats file not found: {}", stats_path.display());
-    }
-
-    let raw = fs::read_to_string(stats_path)
-        .with_context(|| format!("Failed to read Claude stats {}", stats_path.display()))?;
-    if raw.trim().is_empty() {
-        bail!("Claude stats file is empty: {}", stats_path.display());
-    }
-
-    let parsed: ClaudeStatsFile =
-        serde_json::from_str(&raw).context("Failed to parse Claude stats JSON")?;
-    let window = calendar_window(now);
-    let mut baseline = ClaudeBaseline {
-        last_computed_date: parsed
-            .last_computed_date
-            .as_deref()
-            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()),
-        ..ClaudeBaseline::default()
-    };
-
-    update_latest_iso(
-        &mut baseline.aggregate.latest_data_at,
-        parsed
-            .last_computed_date
-            .as_deref()
-            .and_then(|day| iso_from_day(day, now.offset())),
-    );
-
-    for row in &parsed.daily_model_tokens {
-        let Some(day) = row.date.as_deref() else {
-            continue;
-        };
-        let Ok(day_value) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
-            continue;
-        };
-
-        accumulate_claude_usage(
-            &mut baseline.aggregate,
-            row.tokens_by_model.values().copied().sum::<u64>(),
-            day_value,
-            &window,
-        );
-        update_latest_iso(
-            &mut baseline.aggregate.latest_data_at,
-            iso_from_day(day, now.offset()),
-        );
-    }
-
-    baseline.aggregate.total_tokens = parsed
-        .model_usage
-        .values()
-        .map(claude_stats_usage_tokens)
-        .sum();
-
-    Ok(baseline)
-}
-
-fn read_claude_project_usage(
-    projects_path: &Path,
-    now: DateTime<FixedOffset>,
-    cutoff_date: Option<NaiveDate>,
-) -> Result<ClaudeProjectScan> {
-    if !projects_path.exists() {
-        bail!("Claude project logs not found: {}", projects_path.display());
-    }
-
-    let files = collect_jsonl_files(projects_path)?;
-    if files.is_empty() {
-        bail!("Claude project logs are empty: {}", projects_path.display());
-    }
-
-    let mut entries = HashMap::<String, ClaudeProjectUsageEntry>::new();
-    let mut latest_data_at = None;
-
-    for path in files {
-        let file = fs::File::open(&path)
-            .with_context(|| format!("Failed to open Claude project log {}", path.display()))?;
-        let reader = BufReader::new(file);
-
-        for line in reader.lines() {
-            let line = line
-                .with_context(|| format!("Failed to read Claude project log {}", path.display()))?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            let Ok(event) = serde_json::from_str::<ClaudeProjectEvent>(trimmed) else {
-                continue;
-            };
-            let Some(message) = event.message.as_ref() else {
-                continue;
-            };
-            if message.role.as_deref() != Some("assistant") {
-                continue;
-            }
-            let Some(usage) = message.usage.as_ref() else {
-                continue;
-            };
-            let Some(timestamp) = event.timestamp.as_deref() else {
-                continue;
-            };
-            let Ok(parsed_timestamp) = DateTime::parse_from_rfc3339(timestamp) else {
-                continue;
-            };
-
-            let local_timestamp = parsed_timestamp.with_timezone(now.offset());
-            let local_iso = local_timestamp.to_rfc3339();
-            let local_day = local_timestamp.date_naive();
-            let usage_tokens = claude_project_usage_tokens(usage);
-            let key = message
-                .id
-                .as_deref()
-                .or(event.request_id.as_deref())
-                .or(event.uuid.as_deref())
-                .unwrap_or(timestamp)
-                .to_string();
-
-            update_latest_iso(&mut latest_data_at, Some(local_iso.clone()));
-
-            let should_replace = match entries.get(&key) {
-                Some(existing) => {
-                    usage_tokens > existing.usage_tokens
-                        || (usage_tokens == existing.usage_tokens && local_iso > existing.timestamp)
-                }
-                None => true,
-            };
-
-            if should_replace {
-                entries.insert(
-                    key,
-                    ClaudeProjectUsageEntry {
-                        usage_tokens,
-                        timestamp: local_iso,
-                        day: local_day,
-                    },
-                );
-            }
-        }
-    }
-
-    let window = calendar_window(now);
-    let mut aggregate = ClaudeAggregate::default();
-
-    for entry in entries.values() {
-        if cutoff_date.is_some_and(|cutoff| entry.day <= cutoff) {
-            continue;
-        }
-
-        aggregate.total_tokens += entry.usage_tokens;
-        accumulate_claude_usage(&mut aggregate, entry.usage_tokens, entry.day, &window);
-    }
-
-    Ok(ClaudeProjectScan {
-        aggregate,
-        latest_data_at,
-    })
-}
-
-fn collect_claude_projects_signature(projects_path: &Path) -> Result<ClaudeProjectsSignature> {
-    let files = collect_jsonl_files(projects_path)?;
-    let mut latest_jsonl_mtime_ms = None;
-
-    for path in &files {
-        let mtime = file_modified_ms(Some(path.as_path()))?;
-        if latest_jsonl_mtime_ms.is_none_or(|current| mtime > Some(current)) {
-            latest_jsonl_mtime_ms = mtime;
-        }
-    }
-
-    Ok(ClaudeProjectsSignature {
-        latest_jsonl_mtime_ms,
-        jsonl_file_count: files.len() as u64,
-    })
-}
-
-fn collect_jsonl_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    if !root.exists() {
-        return Ok(files);
-    }
-
-    collect_jsonl_files_recursive(root, &mut files)?;
-    files.sort();
-    Ok(files)
-}
-
-fn collect_jsonl_files_recursive(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_jsonl_files_recursive(&path, files)?;
-            continue;
-        }
-
-        if path.extension() == Some(OsStr::new("jsonl")) {
-            files.push(path);
-        }
-    }
-
-    Ok(())
-}
-
-fn merge_claude_aggregate(target: &mut ClaudeAggregate, extra: &ClaudeAggregate) {
-    target.total_tokens += extra.total_tokens;
-    target.tokens_today += extra.tokens_today;
-    target.tokens_week += extra.tokens_week;
-    target.tokens_month += extra.tokens_month;
-    update_latest_iso(&mut target.latest_data_at, extra.latest_data_at.clone());
-}
-
-fn update_latest_iso(latest: &mut Option<String>, candidate: Option<String>) {
-    if let Some(candidate) = candidate
-        && latest.as_ref().is_none_or(|current| candidate > *current)
-    {
-        *latest = Some(candidate);
-    }
-}
-
-fn accumulate_claude_usage(
-    aggregate: &mut ClaudeAggregate,
-    usage_tokens: u64,
-    day: NaiveDate,
-    window: &CalendarWindow,
-) {
-    if day == window.today_start.date_naive() {
-        aggregate.tokens_today += usage_tokens;
-    }
-    if day >= window.week_start.date_naive() {
-        aggregate.tokens_week += usage_tokens;
-    }
-    if day >= window.month_start.date_naive() {
-        aggregate.tokens_month += usage_tokens;
-    }
-}
-
-fn claude_stats_usage_tokens(usage: &ClaudeModelUsage) -> u64 {
-    usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_read_input_tokens
-        + usage.cache_creation_input_tokens
-}
-
-fn claude_project_usage_tokens(usage: &ClaudeProjectUsage) -> u64 {
-    usage.input_tokens
-        + usage.output_tokens
-        + usage.cache_read_input_tokens
-        + usage.cache_creation_input_tokens
-}
-
 fn collect_source_signatures(paths: &BuildPaths) -> Result<SourceSignatures> {
     Ok(SourceSignatures {
         codex_db_mtime_ms: file_modified_ms(
             find_latest_state_db(&paths.codex_home).ok().as_deref(),
         )?,
         extra_codex_db_signatures: collect_extra_codex_signatures(&paths.extra_codex_homes)?,
-        claude_stats_mtime_ms: file_modified_ms(Some(paths.claude_stats_path.as_path()))?,
-        claude_projects: collect_claude_projects_signature(&paths.claude_projects_path)?,
     })
 }
 
@@ -1039,17 +610,6 @@ fn iso_from_unix(timestamp: i64, offset: &FixedOffset) -> String {
         .to_rfc3339()
 }
 
-fn iso_from_day(day: &str, offset: &FixedOffset) -> Option<String> {
-    let day = NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
-    let end_of_day = day.and_hms_opt(23, 59, 59)?;
-    Some(
-        offset
-            .from_local_datetime(&end_of_day)
-            .single()?
-            .to_rfc3339(),
-    )
-}
-
 struct CalendarWindow {
     today_start: DateTime<FixedOffset>,
     week_start: DateTime<FixedOffset>,
@@ -1082,7 +642,6 @@ impl SourceId {
     fn label(self) -> &'static str {
         match self {
             SourceId::Codex => "Codex",
-            SourceId::ClaudeCode => "Claude Code",
         }
     }
 }
@@ -1090,9 +649,6 @@ impl SourceId {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::fs::File;
-    use std::io::Write;
 
     use rusqlite::params;
     use tempfile::TempDir;
@@ -1116,8 +672,6 @@ mod tests {
         BuildPaths {
             codex_home: root.path().join(".codex"),
             extra_codex_homes: Vec::new(),
-            claude_stats_path: root.path().join(".claude").join("stats-cache.json"),
-            claude_projects_path: root.path().join(".claude").join("projects"),
             cache_path: root.path().join(".cache").join("panel-snapshot-v2.json"),
         }
     }
@@ -1212,96 +766,10 @@ mod tests {
         Ok(())
     }
 
-    fn create_claude_fixture(root: &TempDir) -> Result<()> {
-        let claude_dir = root.path().join(".claude");
-        fs::create_dir_all(&claude_dir)?;
-        fs::write(
-            claude_dir.join("stats-cache.json"),
-            serde_json::json!({
-                "version": 1,
-                "lastComputedDate": "2026-03-22",
-                "dailyModelTokens": [
-                    {
-                        "date": "2026-03-22",
-                        "tokensByModel": { "opus": 50 }
-                    },
-                    {
-                        "date": "2026-03-21",
-                        "tokensByModel": { "opus": 40 }
-                    },
-                    {
-                        "date": "2026-03-01",
-                        "tokensByModel": { "opus": 10 }
-                    }
-                ],
-                "modelUsage": {
-                    "opus": {
-                        "inputTokens": 100,
-                        "outputTokens": 20,
-                        "cacheReadInputTokens": 30,
-                        "cacheCreationInputTokens": 10
-                    }
-                }
-            })
-            .to_string(),
-        )?;
-
-        Ok(())
-    }
-
-    fn write_claude_project_log(
-        root: &TempDir,
-        relative_path: &str,
-        events: &[serde_json::Value],
-    ) -> Result<()> {
-        let path = root
-            .path()
-            .join(".claude")
-            .join("projects")
-            .join(relative_path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let mut file = File::create(path)?;
-        for event in events {
-            writeln!(file, "{}", serde_json::to_string(event)?)?;
-        }
-
-        Ok(())
-    }
-
-    fn claude_project_event(
-        message_id: Option<&str>,
-        request_id: Option<&str>,
-        uuid: &str,
-        timestamp: &str,
-        usage: (u64, u64, u64, u64),
-    ) -> serde_json::Value {
-        let (input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens) =
-            usage;
-        serde_json::json!({
-            "message": {
-                "role": "assistant",
-                "id": message_id,
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_read_input_tokens": cache_read_input_tokens,
-                    "cache_creation_input_tokens": cache_creation_input_tokens
-                }
-            },
-            "requestId": request_id,
-            "uuid": uuid,
-            "timestamp": timestamp
-        })
-    }
-
     #[test]
-    fn build_fresh_snapshot_merges_sources_and_formats_counts() -> Result<()> {
+    fn build_fresh_snapshot_reads_codex_source_and_formats_counts() -> Result<()> {
         let root = TempDir::new()?;
         create_codex_fixture(&root)?;
-        create_claude_fixture(&root)?;
         let paths = build_test_paths(&root);
 
         let snapshot = build_fresh_snapshot(&SnapshotOptions {
@@ -1311,12 +779,12 @@ mod tests {
             paths,
         })?;
 
-        assert_eq!(snapshot.total_tokens, 460);
-        assert_eq!(snapshot.formatted_total_tokens, "460");
-        assert_eq!(snapshot.tokens_today, 250);
-        assert_eq!(snapshot.tokens_week, 390);
-        assert_eq!(snapshot.tokens_month, 400);
-        assert_eq!(snapshot.available_source_count, 2);
+        assert_eq!(snapshot.total_tokens, 300);
+        assert_eq!(snapshot.formatted_total_tokens, "300");
+        assert_eq!(snapshot.tokens_today, 200);
+        assert_eq!(snapshot.tokens_week, 300);
+        assert_eq!(snapshot.tokens_month, 300);
+        assert_eq!(snapshot.available_source_count, 1);
         assert_eq!(snapshot.unavailable_source_count, 0);
         assert_eq!(snapshot.status, SnapshotStatus::Ok);
         assert_eq!(
@@ -1325,7 +793,7 @@ mod tests {
                 .iter()
                 .map(|source| source.total_tokens)
                 .collect::<Vec<_>>(),
-            vec![300, 160]
+            vec![300]
         );
 
         Ok(())
@@ -1343,7 +811,6 @@ mod tests {
             .join("k")
             .join(".codex");
         create_codex_fixture_at(&windows_codex_home, 40, 20)?;
-        create_claude_fixture(&root)?;
 
         let mut paths = build_test_paths(&root);
         paths.extra_codex_homes.push(windows_codex_home);
@@ -1355,10 +822,10 @@ mod tests {
             paths,
         })?;
 
-        assert_eq!(snapshot.total_tokens, 520);
-        assert_eq!(snapshot.tokens_today, 290);
-        assert_eq!(snapshot.tokens_week, 450);
-        assert_eq!(snapshot.tokens_month, 460);
+        assert_eq!(snapshot.total_tokens, 360);
+        assert_eq!(snapshot.tokens_today, 240);
+        assert_eq!(snapshot.tokens_week, 360);
+        assert_eq!(snapshot.tokens_month, 360);
         assert_eq!(snapshot.sources[0].total_tokens, 360);
 
         Ok(())
@@ -1381,163 +848,18 @@ mod tests {
     }
 
     #[test]
-    fn build_fresh_snapshot_marks_missing_sources_as_partial() -> Result<()> {
+    fn build_fresh_snapshot_requires_codex_source() -> Result<()> {
         let root = TempDir::new()?;
-        create_claude_fixture(&root)?;
 
-        let snapshot = build_fresh_snapshot(&SnapshotOptions {
+        let error = build_fresh_snapshot(&SnapshotOptions {
             now: test_now(),
             use_cache: false,
             ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
             paths: build_test_paths(&root),
-        })?;
+        })
+        .expect_err("missing Codex data should fail the token snapshot");
 
-        assert_eq!(snapshot.total_tokens, 160);
-        assert_eq!(snapshot.tokens_today, 50);
-        assert_eq!(snapshot.available_source_count, 1);
-        assert_eq!(snapshot.unavailable_source_count, 1);
-        assert_eq!(snapshot.status, SnapshotStatus::Partial);
-        assert_eq!(snapshot.sources[0].available, false);
-        assert_eq!(snapshot.sources[1].available, true);
-
-        Ok(())
-    }
-
-    #[test]
-    fn read_claude_source_merges_stats_with_project_increment() -> Result<()> {
-        let root = TempDir::new()?;
-        create_claude_fixture(&root)?;
-        write_claude_project_log(
-            &root,
-            "workspace/session-main.jsonl",
-            &[claude_project_event(
-                Some("msg-1"),
-                Some("req-1"),
-                "uuid-1",
-                "2026-03-23T01:00:00Z",
-                (10, 2, 3, 5),
-            )],
-        )?;
-        write_claude_project_log(
-            &root,
-            "workspace/subagents/agent-1.jsonl",
-            &[claude_project_event(
-                Some("msg-2"),
-                Some("req-2"),
-                "uuid-2",
-                "2026-03-24T01:00:00Z",
-                (10, 10, 5, 5),
-            )],
-        )?;
-
-        let now = DateTime::parse_from_rfc3339("2026-03-24T12:00:00+08:00")?;
-        let paths = build_test_paths(&root);
-        let snapshot =
-            read_claude_source(&paths.claude_stats_path, &paths.claude_projects_path, now)?;
-
-        assert_eq!(snapshot.total_tokens, 210);
-        assert_eq!(snapshot.tokens_today, 30);
-        assert_eq!(snapshot.tokens_week, 50);
-        assert_eq!(snapshot.tokens_month, 150);
-        assert_eq!(
-            snapshot.latest_data_at.as_deref(),
-            Some("2026-03-24T09:00:00+08:00")
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn read_claude_project_usage_dedupes_repeated_message_ids() -> Result<()> {
-        let root = TempDir::new()?;
-        write_claude_project_log(
-            &root,
-            "workspace/session.jsonl",
-            &[
-                claude_project_event(
-                    Some("dup"),
-                    Some("req-1"),
-                    "uuid-1",
-                    "2026-03-24T00:10:00Z",
-                    (1, 1, 1, 2),
-                ),
-                claude_project_event(
-                    Some("dup"),
-                    Some("req-1"),
-                    "uuid-2",
-                    "2026-03-24T00:11:00Z",
-                    (3, 3, 3, 3),
-                ),
-                claude_project_event(
-                    Some("dup"),
-                    Some("req-1"),
-                    "uuid-3",
-                    "2026-03-24T00:12:00Z",
-                    (2, 2, 2, 2),
-                ),
-                claude_project_event(
-                    Some("unique"),
-                    Some("req-2"),
-                    "uuid-4",
-                    "2026-03-24T00:13:00Z",
-                    (1, 1, 0, 1),
-                ),
-            ],
-        )?;
-
-        let paths = build_test_paths(&root);
-        let now = DateTime::parse_from_rfc3339("2026-03-24T12:00:00+08:00")?;
-        let scan = read_claude_project_usage(&paths.claude_projects_path, now, None)?;
-
-        assert_eq!(scan.aggregate.total_tokens, 15);
-        assert_eq!(scan.aggregate.tokens_today, 15);
-        assert_eq!(
-            scan.latest_data_at.as_deref(),
-            Some("2026-03-24T08:13:00+08:00")
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn read_claude_source_falls_back_to_projects_when_stats_missing() -> Result<()> {
-        let root = TempDir::new()?;
-        write_claude_project_log(
-            &root,
-            "workspace/session.jsonl",
-            &[
-                claude_project_event(
-                    Some("msg-a"),
-                    Some("req-a"),
-                    "uuid-a",
-                    "2026-03-21T01:00:00Z",
-                    (5, 5, 3, 2),
-                ),
-                claude_project_event(
-                    Some("msg-b"),
-                    Some("req-b"),
-                    "uuid-b",
-                    "2026-03-22T01:00:00Z",
-                    (10, 10, 3, 2),
-                ),
-            ],
-        )?;
-
-        let paths = build_test_paths(&root);
-        let snapshot = read_claude_source(
-            &paths.claude_stats_path,
-            &paths.claude_projects_path,
-            test_now(),
-        )?;
-
-        assert_eq!(snapshot.total_tokens, 40);
-        assert_eq!(snapshot.tokens_today, 25);
-        assert_eq!(snapshot.tokens_week, 40);
-        assert_eq!(snapshot.tokens_month, 40);
-        assert_eq!(
-            snapshot.latest_data_at.as_deref(),
-            Some("2026-03-22T09:00:00+08:00")
-        );
+        assert!(error.to_string().contains("No panel sources are available"));
 
         Ok(())
     }
@@ -1546,7 +868,6 @@ mod tests {
     fn cache_validation_and_stale_fallback_work() -> Result<()> {
         let root = TempDir::new()?;
         create_codex_fixture(&root)?;
-        create_claude_fixture(&root)?;
         let paths = build_test_paths(&root);
 
         let snapshot = load_snapshot(&SnapshotOptions {
@@ -1555,7 +876,7 @@ mod tests {
             ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
             paths: paths.clone(),
         })?;
-        assert_eq!(snapshot.total_tokens, 460);
+        assert_eq!(snapshot.total_tokens, 300);
 
         let cache = read_cache(&paths.cache_path)?;
         let signatures = collect_source_signatures(&paths)?;
@@ -1567,7 +888,6 @@ mod tests {
         ));
 
         fs::remove_file(&paths.codex_home.join("state_1.sqlite"))?;
-        fs::remove_file(&paths.claude_stats_path)?;
 
         let stale_snapshot = load_snapshot(&SnapshotOptions {
             now: test_now() + Duration::seconds(20),
@@ -1577,7 +897,7 @@ mod tests {
         })?;
 
         assert_eq!(stale_snapshot.status, SnapshotStatus::Stale);
-        assert_eq!(stale_snapshot.total_tokens, 460);
+        assert_eq!(stale_snapshot.total_tokens, 300);
         assert!(
             stale_snapshot
                 .error
@@ -1594,57 +914,21 @@ mod tests {
     }
 
     #[test]
-    fn signatures_change_when_source_mtime_changes() -> Result<()> {
+    fn signatures_change_when_codex_db_mtime_changes() -> Result<()> {
         let root = TempDir::new()?;
-        create_claude_fixture(&root)?;
+        create_codex_fixture(&root)?;
         let paths = build_test_paths(&root);
         let before = collect_source_signatures(&paths)?;
 
         std::thread::sleep(StdDuration::from_secs(1));
-        let mut file = File::options()
-            .append(true)
-            .open(&paths.claude_stats_path)?;
-        writeln!(file, " ")?;
-        file.sync_all()?;
-
-        let after = collect_source_signatures(&paths)?;
-        assert_ne!(before.claude_stats_mtime_ms, after.claude_stats_mtime_ms);
-
-        Ok(())
-    }
-
-    #[test]
-    fn project_log_signatures_change_when_logs_change() -> Result<()> {
-        let root = TempDir::new()?;
-        write_claude_project_log(
-            &root,
-            "workspace/session.jsonl",
-            &[claude_project_event(
-                Some("msg-1"),
-                Some("req-1"),
-                "uuid-1",
-                "2026-03-22T01:00:00Z",
-                (1, 1, 1, 1),
-            )],
-        )?;
-        let paths = build_test_paths(&root);
-        let before = collect_source_signatures(&paths)?;
-
-        std::thread::sleep(StdDuration::from_secs(1));
-        write_claude_project_log(
-            &root,
-            "workspace/second-session.jsonl",
-            &[claude_project_event(
-                Some("msg-2"),
-                Some("req-2"),
-                "uuid-2",
-                "2026-03-23T01:00:00Z",
-                (2, 2, 2, 2),
-            )],
+        let db = Connection::open(paths.codex_home.join("state_1.sqlite"))?;
+        db.execute(
+            "UPDATE threads SET tokens_used = tokens_used + 1 WHERE id = ?1",
+            params!["thread-1"],
         )?;
 
         let after = collect_source_signatures(&paths)?;
-        assert_ne!(before.claude_projects, after.claude_projects);
+        assert_ne!(before.codex_db_mtime_ms, after.codex_db_mtime_ms);
 
         Ok(())
     }

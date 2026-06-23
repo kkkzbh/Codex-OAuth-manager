@@ -11,6 +11,7 @@ Kirigami.FormLayout {
     property string cfg_collectorPath: Plasmoid.configuration.collectorPath
     property string cfg_codexHomePath: Plasmoid.configuration.codexHomePath
     property int cfg_refreshIntervalSeconds: Plasmoid.configuration.refreshIntervalSeconds
+    property int cfg_tokenRefreshIntervalSeconds: Plasmoid.configuration.tokenRefreshIntervalSeconds
     property int cfg_startupRefreshDelaySeconds: Plasmoid.configuration.startupRefreshDelaySeconds
     property int cfg_warnPercent: Plasmoid.configuration.warnPercent
     property int cfg_dangerPercent: Plasmoid.configuration.dangerPercent
@@ -48,9 +49,26 @@ Kirigami.FormLayout {
         value: page.cfg_refreshIntervalSeconds
         editable: true
         onValueModified: page.cfg_refreshIntervalSeconds = value
-        textFromValue: function(value) { return i18n("%1 seconds", value) }
-        valueFromText: function(text) {
-            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_refreshIntervalSeconds || 120
+        textFromValue: function (value) {
+            return i18n("%1 seconds", value);
+        }
+        valueFromText: function (text) {
+            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_refreshIntervalSeconds || 120;
+        }
+    }
+
+    QQC2.SpinBox {
+        Kirigami.FormData.label: i18n("Token refresh interval:")
+        from: 1
+        to: 60
+        value: page.cfg_tokenRefreshIntervalSeconds
+        editable: true
+        onValueModified: page.cfg_tokenRefreshIntervalSeconds = value
+        textFromValue: function (value) {
+            return i18n("%1 seconds", value);
+        }
+        valueFromText: function (text) {
+            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_tokenRefreshIntervalSeconds || 3;
         }
     }
 
@@ -61,9 +79,11 @@ Kirigami.FormLayout {
         value: page.cfg_startupRefreshDelaySeconds
         editable: true
         onValueModified: page.cfg_startupRefreshDelaySeconds = value
-        textFromValue: function(value) { return i18n("%1 seconds", value) }
-        valueFromText: function(text) {
-            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_startupRefreshDelaySeconds || 15
+        textFromValue: function (value) {
+            return i18n("%1 seconds", value);
+        }
+        valueFromText: function (text) {
+            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_startupRefreshDelaySeconds || 15;
         }
     }
 
@@ -113,9 +133,11 @@ Kirigami.FormLayout {
         value: page.cfg_liveFetchTimeoutSeconds
         editable: true
         onValueModified: page.cfg_liveFetchTimeoutSeconds = value
-        textFromValue: function(value) { return i18n("%1 seconds", value) }
-        valueFromText: function(text) {
-            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_liveFetchTimeoutSeconds || 12
+        textFromValue: function (value) {
+            return i18n("%1 seconds", value);
+        }
+        valueFromText: function (text) {
+            return Number(String(text).replace(/[^0-9]/g, "")) || page.cfg_liveFetchTimeoutSeconds || 12;
         }
     }
 

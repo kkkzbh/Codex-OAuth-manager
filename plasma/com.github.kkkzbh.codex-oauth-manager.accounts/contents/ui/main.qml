@@ -13,12 +13,11 @@ PlasmoidItem {
 
     readonly property string homePath: normalizePath(StandardPaths.writableLocation(StandardPaths.HomeLocation))
     readonly property string bridgePathExpanded: expandPath(Plasmoid.configuration.bridgePath || "~/.local/bin/codexbar-accounts-plasmoid-bridge")
-    readonly property string bridgeDir: bridgePathExpanded.lastIndexOf("/") > 0
-        ? bridgePathExpanded.slice(0, bridgePathExpanded.lastIndexOf("/"))
-        : homePath + "/.local/bin"
+    readonly property string bridgeDir: bridgePathExpanded.lastIndexOf("/") > 0 ? bridgePathExpanded.slice(0, bridgePathExpanded.lastIndexOf("/")) : homePath + "/.local/bin"
     readonly property string collectorPathExpanded: expandPath(Plasmoid.configuration.collectorPath || "~/.local/bin/codexbar-collector")
     readonly property string codexHomePathExpanded: expandPath(Plasmoid.configuration.codexHomePath || "~/.codex")
     readonly property int refreshIntervalSeconds: Math.max(10, Plasmoid.configuration.refreshIntervalSeconds || 120)
+    readonly property int tokenRefreshIntervalSeconds: Math.max(1, Plasmoid.configuration.tokenRefreshIntervalSeconds || 3)
     readonly property int startupRefreshDelaySeconds: Math.max(0, Plasmoid.configuration.startupRefreshDelaySeconds || 15)
     readonly property int warnPercent: Plasmoid.configuration.warnPercent || 75
     readonly property int dangerPercent: Plasmoid.configuration.dangerPercent || 90
@@ -30,16 +29,11 @@ PlasmoidItem {
     readonly property string terminalCommand: Plasmoid.configuration.terminalCommand || "kitty -e {command}"
     readonly property string loginCommand: Plasmoid.configuration.loginCommand || "codex login"
     readonly property int currentRefreshCooldownMs: Math.max(3 * 60 * 1000, refreshIntervalSeconds * 2000)
+    readonly property int resetCreditsCacheTtlMs: Math.max(5 * 60 * 1000, currentRefreshCooldownMs)
     readonly property var snapshot: mergedSnapshotForDisplay(allSnapshot, activeSnapshot)
     readonly property var currentAccount: currentAccountFromSnapshotData(snapshot)
-    readonly property int knownAccountCount: Math.max(
-        1,
-        Number(snapshot && snapshot.accountCount ? snapshot.accountCount : 0)
-        || Number(allSnapshot && allSnapshot.accountCount ? allSnapshot.accountCount : 0)
-        || Number(snapshot && snapshot.accounts ? snapshot.accounts.length : 0)
-        || Number(allSnapshot && allSnapshot.accounts ? allSnapshot.accounts.length : 0)
-        || 1
-    )
+    readonly property var otherAccounts: accountsExcludingCurrent(snapshot.accounts || [], currentAccount)
+    readonly property int knownAccountCount: Math.max(1, Number(snapshot && snapshot.accountCount ? snapshot.accountCount : 0) || Number(allSnapshot && allSnapshot.accountCount ? allSnapshot.accountCount : 0) || Number(snapshot && snapshot.accounts ? snapshot.accounts.length : 0) || Number(allSnapshot && allSnapshot.accounts ? allSnapshot.accounts.length : 0) || 1)
     readonly property string snapshotGeneratedAt: snapshot && snapshot.generatedAt ? String(snapshot.generatedAt) : ""
     readonly property string currentAccountGeneratedAt: accountTimestamp(currentAccount)
     readonly property int currentAccountSessionPercent: usagePercent(currentAccount, "session")
@@ -47,10 +41,13 @@ PlasmoidItem {
     readonly property string currentAccountSessionLabel: usageLabel(currentAccount, "session")
     readonly property string currentAccountWeeklyLabel: usageLabel(currentAccount, "weekly")
     readonly property bool resetCreditsLoading: actionInFlight && pendingAction === "reset-credits"
+    readonly property string tokenCommandSource: "sh -lc " + shellQuote(buildBridgeCommand("token-snapshot", []))
 
     property bool isLoading: true
+    property bool tokenIsLoading: true
     property bool actionInFlight: false
     property string errorMessage: ""
+    property string tokenErrorMessage: ""
     property string resetCreditsError: ""
     property string pendingAction: ""
     property string pendingSnapshotAccountKey: ""
@@ -58,25 +55,38 @@ PlasmoidItem {
     property double lastAutoSwitchAtMs: 0
     property var resetCreditsByAccount: ({})
     property var activeSnapshot: ({
-        generatedAt: "",
-        status: "error",
-        error: null,
-        activeAccountKey: "",
-        accountCount: 0,
-        healthyAccountCount: 0,
-        staleAccountCount: 0,
-        accounts: []
-    })
+            generatedAt: "",
+            status: "error",
+            error: null,
+            activeAccountKey: "",
+            accountCount: 0,
+            healthyAccountCount: 0,
+            staleAccountCount: 0,
+            accounts: []
+        })
     property var allSnapshot: ({
-        generatedAt: "",
-        status: "error",
-        error: null,
-        activeAccountKey: "",
-        accountCount: 0,
-        healthyAccountCount: 0,
-        staleAccountCount: 0,
-        accounts: []
-    })
+            generatedAt: "",
+            status: "error",
+            error: null,
+            activeAccountKey: "",
+            accountCount: 0,
+            healthyAccountCount: 0,
+            staleAccountCount: 0,
+            accounts: []
+        })
+    property var tokenSnapshot: ({
+            generatedAt: "",
+            totalTokens: 0,
+            formattedTotalTokens: "--",
+            tokensToday: 0,
+            tokensWeek: 0,
+            tokensMonth: 0,
+            sources: [],
+            availableSourceCount: 0,
+            unavailableSourceCount: 0,
+            status: "error",
+            error: null
+        })
 
     Plasmoid.backgroundHints: PlasmaCore.Types.DefaultBackground | PlasmaCore.Types.ConfigurableBackground
     Plasmoid.title: i18n("CodexBar Accounts")
@@ -95,12 +105,7 @@ PlasmoidItem {
         if (!currentAccount) {
             return i18n("No active Codex account");
         }
-        return i18n("%1 · 5h %2% · 1w %3% · %4 · %5",
-                    displayName(currentAccount),
-                    currentAccountSessionPercent,
-                    currentAccountWeeklyPercent,
-                    currentAccount.usageSource === "live" ? i18n("Live") : i18n("Cached"),
-                    relativeTimestamp(currentAccountGeneratedAt));
+        return i18n("%1 · 5h %2% · 1w %3% · %4 · %5", displayName(currentAccount), currentAccountSessionPercent, currentAccountWeeklyPercent, currentAccount.usageSource === "live" ? i18n("Live") : i18n("Cached"), relativeTimestamp(currentAccountGeneratedAt));
     }
 
     function expandPath(pathValue) {
@@ -122,20 +127,7 @@ PlasmoidItem {
 
     function buildBridgeCommand(commandName, extraArgs) {
         const args = extraArgs && extraArgs.length > 0 ? " " + extraArgs.join(" ") : "";
-        return "env PATH="
-            + shellQuote(bridgeDir + ":/usr/local/bin:/usr/bin:/bin")
-            + " COLLECTOR_PATH=" + shellQuote(collectorPathExpanded)
-            + " CODEX_HOME_PATH=" + shellQuote(codexHomePathExpanded)
-            + " REFRESH_INTERVAL_SECONDS=" + shellQuote(String(refreshIntervalSeconds))
-            + " FETCH_CONCURRENCY=" + shellQuote(String(liveFetchConcurrency))
-            + " FETCH_TIMEOUT_SECONDS=" + shellQuote(String(liveFetchTimeoutSeconds))
-            + " TERMINAL_COMMAND=" + shellQuote(terminalCommand)
-            + " LOGIN_COMMAND=" + shellQuote(loginCommand)
-            + " AUTO_SWITCH_5H_THRESHOLD=" + shellQuote(String(autoSwitch5hThreshold))
-            + " AUTO_SWITCH_WEEKLY_THRESHOLD=" + shellQuote(String(autoSwitchWeeklyThreshold))
-            + " " + shellQuote(bridgePathExpanded)
-            + " " + shellQuote(commandName)
-            + args;
+        return "env PATH=" + shellQuote(bridgeDir + ":/usr/local/bin:/usr/bin:/bin") + " COLLECTOR_PATH=" + shellQuote(collectorPathExpanded) + " CODEX_HOME_PATH=" + shellQuote(codexHomePathExpanded) + " REFRESH_INTERVAL_SECONDS=" + shellQuote(String(refreshIntervalSeconds)) + " TOKEN_TTL_SECONDS=" + shellQuote(String(tokenRefreshIntervalSeconds)) + " FETCH_CONCURRENCY=" + shellQuote(String(liveFetchConcurrency)) + " FETCH_TIMEOUT_SECONDS=" + shellQuote(String(liveFetchTimeoutSeconds)) + " TERMINAL_COMMAND=" + shellQuote(terminalCommand) + " LOGIN_COMMAND=" + shellQuote(loginCommand) + " AUTO_SWITCH_5H_THRESHOLD=" + shellQuote(String(autoSwitch5hThreshold)) + " AUTO_SWITCH_WEEKLY_THRESHOLD=" + shellQuote(String(autoSwitchWeeklyThreshold)) + " " + shellQuote(bridgePathExpanded) + " " + shellQuote(commandName) + args;
     }
 
     function fullRefreshTimeoutSeconds() {
@@ -144,9 +136,7 @@ PlasmoidItem {
     }
 
     function isFullSnapshotAction(actionName) {
-        return actionName === "snapshot-all"
-            || actionName === "snapshot-background"
-            || actionName === "snapshot-resync";
+        return actionName === "snapshot-all" || actionName === "snapshot-background" || actionName === "snapshot-resync";
     }
 
     function requestTimeoutMs(actionName) {
@@ -190,10 +180,7 @@ PlasmoidItem {
         }
         commandInvocationSerial += 1;
         const invocationNonce = String(Date.now()) + "-" + String(commandInvocationSerial);
-        const invocationCommand = "env CODEXBAR_REQUEST_NONCE="
-            + shellQuote(invocationNonce)
-            + " "
-            + buildBridgeCommand(commandName, extraArgs);
+        const invocationCommand = "env CODEXBAR_REQUEST_NONCE=" + shellQuote(invocationNonce) + " " + buildBridgeCommand(commandName, extraArgs);
         executable.connectedSources = [];
         executable.connectedSources = ["sh -lc " + shellQuote(invocationCommand)];
         const timeoutMs = requestTimeoutMs(actionName);
@@ -215,19 +202,23 @@ PlasmoidItem {
     }
 
     function refreshAccount(accountKey) {
-        return runCommand(
-            "snapshot-account",
-            "snapshot",
-            ["--force-refresh", "--account-key", shellQuote(accountKey)],
-            true,
-            accountKey
-        );
+        return runCommand("snapshot-account", "snapshot", ["--force-refresh", "--account-key", shellQuote(accountKey)], true, accountKey);
     }
 
     function refreshBackground() {
         // Background polling keeps every account row fresh, but it should still
         // respect collector backoff for accounts that are consistently failing.
         refreshAll(false, "snapshot-background");
+    }
+
+    function refreshTokens() {
+        tokenExecutable.connectedSources = [];
+        tokenExecutable.connectedSources = [tokenCommandSource];
+    }
+
+    function refreshEverything() {
+        refreshTokens();
+        return refreshAll(true);
     }
 
     function addAccount() {
@@ -251,12 +242,14 @@ PlasmoidItem {
         if (!snapshotData || !snapshotData.accounts) {
             return snapshotData;
         }
-        const updatedAccounts = snapshotData.accounts.map(function(account) {
+        const updatedAccounts = snapshotData.accounts.map(function (account) {
             const isActive = account.accountKey === accountKey;
             if (account.isActive === isActive) {
                 return account;
             }
-            return Object.assign({}, account, { isActive: isActive });
+            return Object.assign({}, account, {
+                isActive: isActive
+            });
         });
         return Object.assign({}, snapshotData, {
             accounts: updatedAccounts,
@@ -282,13 +275,10 @@ PlasmoidItem {
             return false;
         }
         resetCreditsError = "";
-        return runCommand(
-            "reset-credits",
-            "reset-credits",
-            ["--account-key", shellQuote(key)],
-            false,
-            key
-        );
+        if (resetCreditsCacheIsFresh(resetCreditsForAccount(key))) {
+            return true;
+        }
+        return runCommand("reset-credits", "reset-credits", ["--account-key", shellQuote(key)], false, key);
     }
 
     function maybeAutoSwitch() {
@@ -307,16 +297,41 @@ PlasmoidItem {
         return !!(snapshotData && snapshotData.accounts && snapshotData.accounts.length > 0);
     }
 
+    function accountsExcludingCurrent(accounts, current) {
+        const currentKey = accountKey(current);
+        return accounts.filter(function (account) {
+            return accountKey(account) !== currentKey;
+        });
+    }
+
     function parseSnapshotPayload(stdout) {
         try {
             const parsed = JSON.parse(stdout);
-            if (!parsed.accounts) parsed.accounts = [];
+            if (!parsed.accounts)
+                parsed.accounts = [];
             logActiveAccountDiagnostics(parsed);
             return parsed;
         } catch (error) {
             console.log("[codexbar-accounts] invalid payload", stdout);
             errorMessage = i18n("Invalid collector payload");
             isLoading = false;
+            return null;
+        }
+    }
+
+    function parseTokenPayload(stdout) {
+        try {
+            const parsed = JSON.parse(stdout);
+            if (!parsed.sources)
+                parsed.sources = [];
+            tokenSnapshot = parsed;
+            tokenErrorMessage = parsed.error ? String(parsed.error) : "";
+            tokenIsLoading = false;
+            return parsed;
+        } catch (error) {
+            console.log("[codexbar-accounts] invalid token payload", stdout);
+            tokenErrorMessage = i18n("Invalid token payload");
+            tokenIsLoading = false;
             return null;
         }
     }
@@ -383,9 +398,7 @@ PlasmoidItem {
         }
         const generatedAt = account.generatedAt ? String(account.generatedAt) : "";
         const lastUsageAt = account.lastUsageAt ? String(account.lastUsageAt) : "";
-        return timestampMs(lastUsageAt) >= timestampMs(generatedAt)
-            ? (lastUsageAt || generatedAt)
-            : (generatedAt || lastUsageAt);
+        return timestampMs(lastUsageAt) >= timestampMs(generatedAt) ? (lastUsageAt || generatedAt) : (generatedAt || lastUsageAt);
     }
 
     function preferAccountSnapshot(primary, secondary) {
@@ -431,17 +444,11 @@ PlasmoidItem {
 
         let status = snapshotData && snapshotData.status ? String(snapshotData.status) : "ok";
         if (accounts.length > 0) {
-            status = healthyAccountCount > 0
-                ? (staleAccountCount > 0 || hasErrorAccount ? "stale" : "ok")
-                : "error";
+            status = healthyAccountCount > 0 ? (staleAccountCount > 0 || hasErrorAccount ? "stale" : "ok") : "error";
         }
 
-        const nextError = typeof errorText === "string"
-            ? (errorText.length > 0 ? errorText : null)
-            : (snapshotData && snapshotData.error ? snapshotData.error : null);
-        const nextGeneratedAt = generatedAt && String(generatedAt).length > 0
-            ? String(generatedAt)
-            : (snapshotData && snapshotData.generatedAt ? String(snapshotData.generatedAt) : "");
+        const nextError = typeof errorText === "string" ? (errorText.length > 0 ? errorText : null) : (snapshotData && snapshotData.error ? snapshotData.error : null);
+        const nextGeneratedAt = generatedAt && String(generatedAt).length > 0 ? String(generatedAt) : (snapshotData && snapshotData.generatedAt ? String(snapshotData.generatedAt) : "");
 
         return Object.assign({}, snapshotData, {
             generatedAt: nextGeneratedAt,
@@ -465,7 +472,7 @@ PlasmoidItem {
         }
 
         let replaced = false;
-        const mergedAccounts = snapshotData.accounts.map(function(existingAccount) {
+        const mergedAccounts = snapshotData.accounts.map(function (existingAccount) {
             if (accountKey(existingAccount) !== targetKey) {
                 return existingAccount;
             }
@@ -489,9 +496,7 @@ PlasmoidItem {
         }
 
         const account = parsed.accounts.length > 0 ? parsed.accounts[0] : null;
-        const targetKey = expectedAccountKey && expectedAccountKey.length > 0
-            ? String(expectedAccountKey)
-            : accountKey(account);
+        const targetKey = expectedAccountKey && expectedAccountKey.length > 0 ? String(expectedAccountKey) : accountKey(account);
         const currentKey = accountKey(currentAccount);
         const parsedError = parsed.error ? String(parsed.error) : "";
         const parsedGeneratedAt = parsed.generatedAt ? String(parsed.generatedAt) : "";
@@ -503,13 +508,11 @@ PlasmoidItem {
         }
 
         if (accountKey(account) !== targetKey) {
-            console.warn("[codexbar-accounts] refreshed account key `" + accountKey(account)
-                + "` did not match requested `" + targetKey + "`");
+            console.warn("[codexbar-accounts] refreshed account key `" + accountKey(account) + "` did not match requested `" + targetKey + "`");
         }
 
         if (!accountForKey(snapshot, targetKey)) {
-            console.warn("[codexbar-accounts] refreshed account `" + targetKey
-                + "` was not found in current snapshot; scheduling resync");
+            console.warn("[codexbar-accounts] refreshed account `" + targetKey + "` was not found in current snapshot; scheduling resync");
             errorMessage = parsedError;
             isLoading = false;
             refreshAll(false, "snapshot-resync");
@@ -537,17 +540,15 @@ PlasmoidItem {
     function parseResetCredits(stdout, expectedAccountKey) {
         try {
             const parsed = JSON.parse(stdout);
-            if (!parsed.credits) parsed.credits = [];
-            const targetKey = expectedAccountKey && expectedAccountKey.length > 0
-                ? String(expectedAccountKey)
-                : String(parsed.accountKey || "");
+            if (!parsed.credits)
+                parsed.credits = [];
+            const targetKey = expectedAccountKey && expectedAccountKey.length > 0 ? String(expectedAccountKey) : String(parsed.accountKey || "");
             if (targetKey.length === 0) {
                 resetCreditsError = i18n("Reset credits response did not include an account");
                 return null;
             }
             if (parsed.accountKey && String(parsed.accountKey) !== targetKey) {
-                console.warn("[codexbar-accounts] reset credits account key `" + String(parsed.accountKey)
-                    + "` did not match requested `" + targetKey + "`");
+                console.warn("[codexbar-accounts] reset credits account key `" + String(parsed.accountKey) + "` did not match requested `" + targetKey + "`");
             }
             const updated = Object.assign({}, resetCreditsByAccount);
             updated[targetKey] = parsed;
@@ -562,29 +563,19 @@ PlasmoidItem {
     }
 
     function mergedSnapshotForDisplay(allSnapshotData, activeSnapshotData) {
-        const baseSnapshot = snapshotHasAccounts(allSnapshotData)
-            ? allSnapshotData
-            : activeSnapshotData;
+        const baseSnapshot = snapshotHasAccounts(allSnapshotData) ? allSnapshotData : activeSnapshotData;
         if (!snapshotHasAccounts(baseSnapshot)) {
             return baseSnapshot;
         }
 
         const activeKey = activeAccountKeyFromSnapshot(baseSnapshot);
-        const preferredCurrent = preferAccountSnapshot(
-            accountForKey(allSnapshotData, activeKey),
-            accountForKey(activeSnapshotData, activeKey)
-        );
-        return replaceAccountInSnapshot(
-            baseSnapshot,
-            preferredCurrent || currentAccountFromSnapshotData(baseSnapshot)
-        );
+        const preferredCurrent = preferAccountSnapshot(accountForKey(allSnapshotData, activeKey), accountForKey(activeSnapshotData, activeKey));
+        return replaceAccountInSnapshot(baseSnapshot, preferredCurrent || currentAccountFromSnapshotData(baseSnapshot));
     }
 
     function currentAccountFromSnapshotData(snapshotData) {
         const accounts = snapshotData && snapshotData.accounts ? snapshotData.accounts : [];
-        const activeAccountKey = snapshotData && snapshotData.activeAccountKey
-            ? String(snapshotData.activeAccountKey)
-            : "";
+        const activeAccountKey = snapshotData && snapshotData.activeAccountKey ? String(snapshotData.activeAccountKey) : "";
         if (activeAccountKey.length > 0) {
             for (let index = 0; index < accounts.length; index += 1) {
                 if (accountKey(accounts[index]) === activeAccountKey) {
@@ -601,8 +592,7 @@ PlasmoidItem {
     }
 
     function isCurrentAccount(account) {
-        return accountKey(account).length > 0
-            && accountKey(account) === accountKey(currentAccount);
+        return accountKey(account).length > 0 && accountKey(account) === accountKey(currentAccount);
     }
 
     function usageWindow(account, windowName) {
@@ -624,11 +614,23 @@ PlasmoidItem {
         return window ? Number(window.usedPercent || 0) : 0;
     }
 
+    function hasUsageWindow(account, windowName) {
+        return usageWindow(account, windowName) !== null;
+    }
+
+    function usagePercentLabel(account, windowName) {
+        const window = usageWindow(account, windowName);
+        return window ? i18n("%1%", window.usedPercent) : "";
+    }
+
+    function usageResetLabel(account, windowName) {
+        const window = usageWindow(account, windowName);
+        return window ? String(window.resetsInLabel || "") : "";
+    }
+
     function usageLabel(account, windowName) {
         const window = usageWindow(account, windowName);
-        return window
-            ? i18n("%1% · %2", window.usedPercent, window.resetsInLabel)
-            : "--";
+        return window ? i18n("%1% · %2", window.usedPercent, window.resetsInLabel) : "--";
     }
 
     function resetCreditCount(account) {
@@ -652,6 +654,14 @@ PlasmoidItem {
         return key.length > 0 && resetCreditsByAccount[key] ? resetCreditsByAccount[key] : null;
     }
 
+    function resetCreditsCacheIsFresh(snapshotData) {
+        if (!snapshotData) {
+            return false;
+        }
+        const generatedAtMs = timestampMs(snapshotData.generatedAt);
+        return generatedAtMs > 0 && Date.now() - generatedAtMs < resetCreditsCacheTtlMs;
+    }
+
     function currentResetCredits() {
         return currentAccount ? resetCreditsForAccount(accountKey(currentAccount)) : null;
     }
@@ -672,9 +682,7 @@ PlasmoidItem {
             return i18n("Status unknown");
         }
         const status = String(credit.status);
-        return status.length > 0
-            ? status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " ")
-            : i18n("Status unknown");
+        return status.length > 0 ? status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " ") : i18n("Status unknown");
     }
 
     function resetCreditRemainingText(credit) {
@@ -698,9 +706,7 @@ PlasmoidItem {
             return;
         }
 
-        const activeAccountKey = snapshotData && snapshotData.activeAccountKey
-            ? String(snapshotData.activeAccountKey)
-            : "";
+        const activeAccountKey = snapshotData && snapshotData.activeAccountKey ? String(snapshotData.activeAccountKey) : "";
         let activeKeyMatch = null;
         const flaggedKeys = [];
 
@@ -719,11 +725,8 @@ PlasmoidItem {
         }
 
         if (flaggedKeys.length > 1) {
-            const resolvedKey = activeKeyMatch
-                ? accountKey(activeKeyMatch)
-                : flaggedKeys[0];
-            console.warn("[codexbar-accounts] snapshot reported multiple active accounts [" + flaggedKeys.join(", ")
-                + "]; resolving to `" + resolvedKey + "`");
+            const resolvedKey = activeKeyMatch ? accountKey(activeKeyMatch) : flaggedKeys[0];
+            console.warn("[codexbar-accounts] snapshot reported multiple active accounts [" + flaggedKeys.join(", ") + "]; resolving to `" + resolvedKey + "`");
         }
     }
 
@@ -785,7 +788,7 @@ PlasmoidItem {
     }
 
     function joinSummaryParts(parts) {
-        return parts.filter(function(part) {
+        return parts.filter(function (part) {
             return String(part || "").length > 0;
         }).join(" · ");
     }
@@ -795,16 +798,10 @@ PlasmoidItem {
             return i18n("No account data available");
         }
         if (isLiveAccountSnapshot(currentAccount)) {
-            return joinSummaryParts([
-                i18n("Live"),
-                relativeTimestamp(currentAccountGeneratedAt)
-            ]);
+            return joinSummaryParts([i18n("Live"), relativeTimestamp(currentAccountGeneratedAt)]);
         }
         const errorText = accountErrorText(currentAccount);
-        return joinSummaryParts([
-            i18n("Showing cached data from %1", relativeTimestamp(currentAccountGeneratedAt)),
-            errorText
-        ]);
+        return joinSummaryParts([i18n("Showing cached data from %1", relativeTimestamp(currentAccountGeneratedAt)), errorText]);
     }
 
     function currentAccountSubtitle() {
@@ -812,17 +809,30 @@ PlasmoidItem {
             if (pendingAction === "reset-credits") {
                 return i18n("Checking reset credits…");
             }
-            return isFullSnapshotAction(pendingAction)
-                ? i18n("Refreshing all account limits…")
-                : i18n("Refreshing account limits…");
+            return isFullSnapshotAction(pendingAction) ? i18n("Refreshing all account limits…") : i18n("Refreshing account limits…");
         }
         if (!currentAccount) {
             return i18n("No account data available");
         }
-        return joinSummaryParts([
-            currentAccount.plan,
-            currentAccountStatusText()
-        ]);
+        return joinSummaryParts([currentAccount.plan, currentAccountStatusText()]);
+    }
+
+    function tokenTotalText() {
+        return tokenIsLoading ? "--" : String(tokenSnapshot.formattedTotalTokens || "--");
+    }
+
+    function tokenStatusText() {
+        if (tokenErrorMessage.length > 0) {
+            return tokenErrorMessage;
+        }
+        if (tokenIsLoading) {
+            return i18n("Loading token totals…");
+        }
+        return i18n("tokens");
+    }
+
+    function tokenUpdatedText() {
+        return tokenIsLoading ? i18n("Updating tokens…") : relativeTimestamp(tokenSnapshot.generatedAt);
     }
 
     function footerStatusText() {
@@ -830,16 +840,11 @@ PlasmoidItem {
             if (pendingAction === "reset-credits") {
                 return i18n("Checking reset credits…");
             }
-            return isFullSnapshotAction(pendingAction)
-                ? i18n("Refreshing all account limits…")
-                : i18n("Refreshing account limits…");
+            return isFullSnapshotAction(pendingAction) ? i18n("Refreshing all account limits…") : i18n("Refreshing account limits…");
         }
         if (isCachedAccountSnapshot(currentAccount)) {
             const errorText = accountErrorText(currentAccount);
-            return joinSummaryParts([
-                i18n("Showing cached data from %1", relativeTimestamp(currentAccountGeneratedAt)),
-                errorText
-            ]);
+            return joinSummaryParts([i18n("Showing cached data from %1", relativeTimestamp(currentAccountGeneratedAt)), errorText]);
         }
         return relativeTimestamp(snapshotGeneratedAt);
     }
@@ -861,9 +866,15 @@ PlasmoidItem {
         return i18n("Updated %1h ago", Math.floor(diffSeconds / 3600));
     }
 
+    function formatInteger(value) {
+        return Number(value || 0).toLocaleString(Qt.locale("en_US"), "f", 0);
+    }
+
     function barColor(percent) {
-        if (percent >= dangerPercent) return Qt.rgba(0.90, 0.30, 0.24, 1.0);
-        if (percent >= warnPercent) return Qt.rgba(0.96, 0.66, 0.18, 1.0);
+        if (percent >= dangerPercent)
+            return Qt.rgba(0.90, 0.30, 0.24, 1.0);
+        if (percent >= warnPercent)
+            return Qt.rgba(0.96, 0.66, 0.18, 1.0);
         return Kirigami.Theme.highlightColor;
     }
 
@@ -880,7 +891,7 @@ PlasmoidItem {
         engine: "executable"
         interval: 0
 
-        onNewData: function(sourceName, data) {
+        onNewData: function (sourceName, data) {
             const exitCode = Number(data["exit code"] ?? data.exitCode ?? 0);
             const stdout = String(data.stdout ?? "");
             const stderr = String(data.stderr ?? "");
@@ -890,9 +901,7 @@ PlasmoidItem {
 
             if (exitCode !== 0) {
                 if (action === "reset-credits") {
-                    root.resetCreditsError = stderr.length > 0
-                        ? stderr.trim()
-                        : i18n("Reset credits query failed");
+                    root.resetCreditsError = stderr.length > 0 ? stderr.trim() : i18n("Reset credits query failed");
                     root.isLoading = false;
                     return;
                 }
@@ -925,6 +934,28 @@ PlasmoidItem {
             // instead of waiting for live HTTP fetches across every account.
             const skipForce = action === "activate" || action === "remove";
             root.refreshAll(!skipForce);
+        }
+    }
+
+    Plasma5Support.DataSource {
+        id: tokenExecutable
+        engine: "executable"
+        interval: root.tokenRefreshIntervalSeconds * 1000
+        connectedSources: root.tokenCommandSource.length > 0 ? [root.tokenCommandSource] : []
+
+        onNewData: function (sourceName, data) {
+            const exitCode = Number(data["exit code"] ?? data.exitCode ?? 0);
+            const stdout = String(data.stdout ?? "");
+            const stderr = String(data.stderr ?? "");
+
+            if (exitCode !== 0) {
+                console.log("[codexbar-accounts] token collector failed", sourceName, stderr);
+                root.tokenErrorMessage = stderr.length > 0 ? stderr.trim() : i18n("Token collector failed");
+                root.tokenIsLoading = false;
+                return;
+            }
+
+            root.parseTokenPayload(stdout);
         }
     }
 
@@ -977,7 +1008,7 @@ PlasmoidItem {
         text: root.actionInFlight ? i18n("Refreshing…") : i18n("Refresh all")
         icon.name: "view-refresh"
         enabled: !root.actionInFlight
-        onTriggered: root.refreshAll(true)
+        onTriggered: root.refreshEverything()
     }
 
     PlasmaCore.Action {
@@ -988,8 +1019,5 @@ PlasmoidItem {
         onTriggered: root.addAccount()
     }
 
-    Plasmoid.contextualActions: [
-        refreshAction,
-        addAccountAction
-    ]
+    Plasmoid.contextualActions: [refreshAction, addAccountAction]
 }

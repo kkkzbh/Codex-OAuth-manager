@@ -8,8 +8,8 @@
       }
     ],
     "Category": "Utilities",
-    "Description": "Shows live 5h and 1w usage for multiple Codex accounts.",
-    "Description[zh_CN]": "显示多个 Codex 账号的实时 5 小时和 1 周额度。",
+    "Description": "Shows Codex account limits and local token totals.",
+    "Description[zh_CN]": "显示 Codex 账号额度和本地 token 汇总。",
     "EnabledByDefault": false,
     "FormFactors": [
       "desktop"
