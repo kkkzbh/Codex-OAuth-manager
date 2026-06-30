@@ -1,6 +1,8 @@
 pub mod accounts;
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, UNIX_EPOCH};
 
@@ -24,6 +26,7 @@ pub struct BuildPaths {
     pub codex_home: PathBuf,
     pub extra_codex_homes: Vec<PathBuf>,
     pub cache_path: PathBuf,
+    pub token_index_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +76,7 @@ pub enum SourceId {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 struct SourceSignatures {
+    codex_db_path: Option<String>,
     codex_db_mtime_ms: Option<u128>,
     #[serde(default)]
     extra_codex_db_signatures: Vec<CodexDbSignature>,
@@ -133,13 +137,18 @@ impl Default for BuildPaths {
                 .unwrap_or_else(|| home_dir.join(".codex")),
             extra_codex_homes: default_extra_codex_homes(),
             cache_path: cache_root.join("codexbar").join("panel-snapshot-v2.json"),
+            token_index_dir: cache_root.join("codexbar").join("token-window-index-v1"),
         }
     }
 }
 
 pub fn load_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV2> {
     let signatures = collect_source_signatures(&options.paths)?;
-    let cached = read_cache(&options.paths.cache_path).ok();
+    let cached = if options.use_cache {
+        read_cache(&options.paths.cache_path).ok()
+    } else {
+        None
+    };
 
     if options.use_cache
         && let Some(envelope) = cached.as_ref()
@@ -183,6 +192,8 @@ pub fn build_fresh_snapshot(options: &SnapshotOptions) -> Result<PanelSnapshotV2
             &options.paths.codex_home,
             &options.paths.extra_codex_homes,
             options.now,
+            &options.paths.token_index_dir,
+            options.use_cache,
         )
     }));
 
@@ -255,6 +266,8 @@ fn read_codex_source(
     codex_home: &Path,
     extra_codex_homes: &[PathBuf],
     now: DateTime<FixedOffset>,
+    token_index_dir: &Path,
+    use_token_index: bool,
 ) -> Result<SourceSnapshot> {
     let mut codex_homes = Vec::with_capacity(1 + extra_codex_homes.len());
     codex_homes.push(codex_home.to_path_buf());
@@ -275,7 +288,11 @@ fn read_codex_source(
         }
 
         attempted_count += 1;
-        match read_single_codex_home(home, now) {
+        let home = fs::canonicalize(&home)
+            .with_context(|| format!("Failed to canonicalize Codex home {}", home.display()))?;
+        let token_index_path = use_token_index
+            .then(|| token_index_dir.join(format!("{}.json", cache_key_for_path(&home))));
+        match read_single_codex_home(&home, now, token_index_path.as_deref()) {
             Ok(snapshot) => {
                 loaded_count += 1;
                 total_tokens += snapshot.total_tokens;
@@ -329,9 +346,70 @@ struct CodexHomeSnapshot {
     latest_timestamp: i64,
 }
 
+#[derive(Debug, Default)]
+struct TokenWindowTotals {
+    tokens_today: u64,
+    tokens_week: u64,
+    tokens_month: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenWindowIndex {
+    today_start: i64,
+    week_start: i64,
+    month_start: i64,
+    entries: Vec<TokenWindowIndexEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenWindowIndexEntry {
+    rollout_path: String,
+    resolved_path: String,
+    thread_tokens_used: u64,
+    size_bytes: u64,
+    modified_ms: Option<u128>,
+    tokens_today: u64,
+    tokens_week: u64,
+    tokens_month: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileSignature {
+    size_bytes: u64,
+    modified_ms: Option<u128>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RolloutRecord {
+    timestamp: Option<String>,
+    #[serde(rename = "type")]
+    record_type: String,
+    payload: Option<RolloutPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RolloutPayload {
+    #[serde(rename = "type")]
+    payload_type: String,
+    info: Option<TokenCountInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenCountInfo {
+    last_token_usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenUsage {
+    total_tokens: i64,
+}
+
 fn read_single_codex_home(
     codex_home: &Path,
     now: DateTime<FixedOffset>,
+    token_index_path: Option<&Path>,
 ) -> Result<CodexHomeSnapshot> {
     if !codex_home.exists() {
         bail!("Codex home not found: {}", codex_home.display());
@@ -351,29 +429,7 @@ fn read_single_codex_home(
         .context("Failed to query Codex total tokens")?
         .max(0) as u64;
 
-    let (tokens_today, tokens_week, tokens_month): (u64, u64, u64) = db
-        .query_row(
-            "
-            SELECT
-              COALESCE(SUM(CASE WHEN updated_at >= ?1 THEN tokens_used ELSE 0 END), 0),
-              COALESCE(SUM(CASE WHEN updated_at >= ?2 THEN tokens_used ELSE 0 END), 0),
-              COALESCE(SUM(CASE WHEN updated_at >= ?3 THEN tokens_used ELSE 0 END), 0)
-            FROM threads
-            ",
-            (
-                window.today_start.timestamp(),
-                window.week_start.timestamp(),
-                window.month_start.timestamp(),
-            ),
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?.max(0) as u64,
-                    row.get::<_, i64>(1)?.max(0) as u64,
-                    row.get::<_, i64>(2)?.max(0) as u64,
-                ))
-            },
-        )
-        .context("Failed to query Codex time windows")?;
+    let token_windows = read_token_windows(codex_home, &db, &window, token_index_path)?;
 
     let latest_timestamp = db
         .query_row("SELECT MAX(updated_at) FROM threads", [], |row| {
@@ -384,18 +440,395 @@ fn read_single_codex_home(
 
     Ok(CodexHomeSnapshot {
         total_tokens,
-        tokens_today,
-        tokens_week,
-        tokens_month,
+        tokens_today: token_windows.tokens_today,
+        tokens_week: token_windows.tokens_week,
+        tokens_month: token_windows.tokens_month,
         latest_timestamp,
     })
 }
 
+fn read_token_windows(
+    codex_home: &Path,
+    db: &Connection,
+    window: &CalendarWindow,
+    token_index_path: Option<&Path>,
+) -> Result<TokenWindowTotals> {
+    let mut stmt = db
+        .prepare(
+            "
+            SELECT rollout_path, SUM(tokens_used)
+            FROM threads
+            WHERE updated_at >= ?1
+              AND tokens_used > 0
+              AND rollout_path IS NOT NULL
+              AND rollout_path != ''
+            GROUP BY rollout_path
+            ",
+        )
+        .context("Failed to prepare Codex rollout query")?;
+
+    let rollout_paths = stmt
+        .query_map([window.month_start.timestamp()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?.max(0) as u64,
+            ))
+        })
+        .context("Failed to query Codex rollout paths")?;
+
+    let mut indexed_entries = token_index_path
+        .and_then(|path| read_token_window_index(path, window).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.rollout_path.clone(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut next_entries = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut totals = TokenWindowTotals::default();
+
+    for rollout_path in rollout_paths {
+        let (rollout_path, thread_tokens_used) =
+            rollout_path.context("Failed to read Codex rollout path")?;
+        if !seen_paths.insert(rollout_path.clone()) {
+            continue;
+        }
+
+        let resolved_path = resolve_rollout_path(codex_home, Path::new(&rollout_path))?;
+        let signature = file_signature(&resolved_path)?;
+        let resolved_path_text = resolved_path.display().to_string();
+        let entry = match indexed_entries.remove(&rollout_path) {
+            Some(entry)
+                if entry.resolved_path == resolved_path_text
+                    && entry.thread_tokens_used == thread_tokens_used
+                    && entry.size_bytes == signature.size_bytes
+                    && entry.modified_ms == signature.modified_ms =>
+            {
+                entry
+            }
+            _ => {
+                let rollout_totals = cap_token_window_totals(
+                    read_rollout_token_windows(&resolved_path, window)?,
+                    thread_tokens_used,
+                );
+                TokenWindowIndexEntry {
+                    rollout_path: rollout_path.clone(),
+                    resolved_path: resolved_path_text,
+                    thread_tokens_used,
+                    size_bytes: signature.size_bytes,
+                    modified_ms: signature.modified_ms,
+                    tokens_today: rollout_totals.tokens_today,
+                    tokens_week: rollout_totals.tokens_week,
+                    tokens_month: rollout_totals.tokens_month,
+                }
+            }
+        };
+
+        let rollout_totals = TokenWindowTotals {
+            tokens_today: entry.tokens_today,
+            tokens_week: entry.tokens_week,
+            tokens_month: entry.tokens_month,
+        };
+        totals.tokens_today += rollout_totals.tokens_today;
+        totals.tokens_week += rollout_totals.tokens_week;
+        totals.tokens_month += rollout_totals.tokens_month;
+        next_entries.push(entry);
+    }
+
+    if let Some(token_index_path) = token_index_path {
+        write_token_window_index(token_index_path, window, next_entries)?;
+    }
+    Ok(totals)
+}
+
+fn cap_token_window_totals(
+    mut totals: TokenWindowTotals,
+    thread_tokens_used: u64,
+) -> TokenWindowTotals {
+    totals.tokens_month = totals.tokens_month.min(thread_tokens_used);
+    totals.tokens_week = totals.tokens_week.min(totals.tokens_month);
+    totals.tokens_today = totals.tokens_today.min(totals.tokens_week);
+    totals
+}
+
+fn read_token_window_index(
+    token_index_path: &Path,
+    window: &CalendarWindow,
+) -> Result<Vec<TokenWindowIndexEntry>> {
+    let raw = fs::read_to_string(token_index_path)
+        .with_context(|| format!("Failed to read {}", token_index_path.display()))?;
+    let index: TokenWindowIndex = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", token_index_path.display()))?;
+
+    if index.today_start != window.today_start.timestamp()
+        || index.week_start != window.week_start.timestamp()
+        || index.month_start != window.month_start.timestamp()
+    {
+        return Ok(Vec::new());
+    }
+
+    Ok(index.entries)
+}
+
+fn write_token_window_index(
+    token_index_path: &Path,
+    window: &CalendarWindow,
+    entries: Vec<TokenWindowIndexEntry>,
+) -> Result<()> {
+    if let Some(parent) = token_index_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create cache directory {}", parent.display()))?;
+    }
+
+    let index = TokenWindowIndex {
+        today_start: window.today_start.timestamp(),
+        week_start: window.week_start.timestamp(),
+        month_start: window.month_start.timestamp(),
+        entries,
+    };
+    let serialized =
+        serde_json::to_string_pretty(&index).context("Failed to encode token window index")?;
+    let temp_path = token_index_path.with_extension("tmp");
+    fs::write(&temp_path, serialized)
+        .with_context(|| format!("Failed to write {}", temp_path.display()))?;
+    fs::rename(&temp_path, token_index_path).with_context(|| {
+        format!(
+            "Failed to move token window index into {}",
+            token_index_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn file_signature(path: &Path) -> Result<FileSignature> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("Failed to stat {}", path.display()))?;
+    let modified = metadata
+        .modified()
+        .with_context(|| format!("Failed to read mtime for {}", path.display()))?;
+
+    Ok(FileSignature {
+        size_bytes: metadata.len(),
+        modified_ms: Some(
+            modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_else(|_| StdDuration::from_secs(0))
+                .as_millis(),
+        ),
+    })
+}
+
+fn resolve_rollout_path(codex_home: &Path, stored_path: &Path) -> Result<PathBuf> {
+    let direct_path = if stored_path.is_absolute() {
+        stored_path.to_path_buf()
+    } else {
+        codex_home.join(stored_path)
+    };
+    if direct_path.exists() {
+        return Ok(direct_path);
+    }
+
+    let file_name = stored_path.file_name().ok_or_else(|| {
+        anyhow!(
+            "Codex rollout path has no file name: {}",
+            stored_path.display()
+        )
+    })?;
+    let archived_path = codex_home.join("archived_sessions").join(file_name);
+    if archived_path.exists() {
+        return Ok(archived_path);
+    }
+
+    bail!("Codex rollout file not found: {}", stored_path.display())
+}
+
+fn read_rollout_token_windows(
+    rollout_path: &Path,
+    window: &CalendarWindow,
+) -> Result<TokenWindowTotals> {
+    let mut totals = TokenWindowTotals::default();
+
+    for_each_token_count_line(rollout_path, |line_index, line| {
+        let record: RolloutRecord = serde_json::from_str(&line).with_context(|| {
+            format!(
+                "Failed to parse Codex rollout {} line {}",
+                rollout_path.display(),
+                line_index + 1
+            )
+        })?;
+        if record.record_type != "event_msg" {
+            return Ok(());
+        }
+
+        let Some(payload) = record.payload else {
+            return Ok(());
+        };
+        if payload.payload_type != "token_count" {
+            return Ok(());
+        }
+
+        let timestamp = record.timestamp.ok_or_else(|| {
+            anyhow!(
+                "Codex token_count event in {} line {} has no timestamp",
+                rollout_path.display(),
+                line_index + 1
+            )
+        })?;
+        let event_at = DateTime::parse_from_rfc3339(&timestamp).with_context(|| {
+            format!(
+                "Failed to parse Codex token_count timestamp in {} line {}",
+                rollout_path.display(),
+                line_index + 1
+            )
+        })?;
+        let Some(info) = payload.info else {
+            return Ok(());
+        };
+        let tokens = token_event_delta(&info).with_context(|| {
+            format!(
+                "Failed to read Codex token_count usage in {} line {}",
+                rollout_path.display(),
+                line_index + 1
+            )
+        })?;
+        if tokens == 0 {
+            return Ok(());
+        }
+
+        if event_at >= window.today_start {
+            totals.tokens_today += tokens;
+        }
+        if event_at >= window.week_start {
+            totals.tokens_week += tokens;
+        }
+        if event_at >= window.month_start {
+            totals.tokens_month += tokens;
+        }
+
+        Ok(())
+    })?;
+
+    Ok(totals)
+}
+
+fn token_event_delta(info: &TokenCountInfo) -> Result<u64> {
+    optional_usage_tokens(info.last_token_usage.as_ref())?
+        .ok_or_else(|| anyhow!("Codex token_count event has no last_token_usage"))
+}
+
+fn optional_usage_tokens(usage: Option<&TokenUsage>) -> Result<Option<u64>> {
+    let Some(usage) = usage else {
+        return Ok(None);
+    };
+
+    if usage.total_tokens < 0 {
+        bail!("Codex token_count event has negative total_tokens");
+    }
+
+    Ok(Some(usage.total_tokens as u64))
+}
+
+fn for_each_token_count_line(
+    rollout_path: &Path,
+    mut handle_line: impl FnMut(usize, String) -> Result<()>,
+) -> Result<()> {
+    const TOKEN_COUNT_PATTERN: &[u8] = br#""type":"token_count""#;
+    const MAX_TOKEN_COUNT_LINE_BYTES: usize = 64 * 1024;
+
+    let file = fs::File::open(rollout_path)
+        .with_context(|| format!("Failed to open Codex rollout {}", rollout_path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut chunk = [0_u8; 64 * 1024];
+    let mut line = Vec::with_capacity(1024);
+    let mut line_index = 0_usize;
+    let mut pattern_index = 0_usize;
+    let mut has_match = false;
+    let mut capture_line = true;
+
+    loop {
+        let bytes_read = reader
+            .read(&mut chunk)
+            .with_context(|| format!("Failed to read Codex rollout {}", rollout_path.display()))?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        for byte in &chunk[..bytes_read] {
+            if *byte == b'\n' {
+                if has_match {
+                    let line_text = String::from_utf8(line.clone()).with_context(|| {
+                        format!(
+                            "Codex rollout {} line {} is not valid UTF-8",
+                            rollout_path.display(),
+                            line_index + 1
+                        )
+                    })?;
+                    handle_line(line_index, line_text)?;
+                }
+                line.clear();
+                line_index += 1;
+                pattern_index = 0;
+                has_match = false;
+                capture_line = true;
+                continue;
+            }
+
+            if capture_line {
+                if line.len() >= MAX_TOKEN_COUNT_LINE_BYTES {
+                    if has_match {
+                        bail!(
+                            "Codex token_count event in {} line {} exceeds {} bytes",
+                            rollout_path.display(),
+                            line_index + 1,
+                            MAX_TOKEN_COUNT_LINE_BYTES
+                        );
+                    }
+                    line.clear();
+                    capture_line = false;
+                    pattern_index = 0;
+                    continue;
+                }
+                line.push(*byte);
+            }
+
+            if capture_line && !has_match {
+                if *byte == TOKEN_COUNT_PATTERN[pattern_index] {
+                    pattern_index += 1;
+                    if pattern_index == TOKEN_COUNT_PATTERN.len() {
+                        has_match = true;
+                    }
+                } else {
+                    pattern_index = if *byte == TOKEN_COUNT_PATTERN[0] {
+                        1
+                    } else {
+                        0
+                    };
+                }
+            }
+        }
+    }
+
+    if has_match {
+        let line_text = String::from_utf8(line).with_context(|| {
+            format!(
+                "Codex rollout {} line {} is not valid UTF-8",
+                rollout_path.display(),
+                line_index + 1
+            )
+        })?;
+        handle_line(line_index, line_text)?;
+    }
+
+    Ok(())
+}
+
 fn collect_source_signatures(paths: &BuildPaths) -> Result<SourceSignatures> {
+    let codex_db_path = find_latest_state_db(&paths.codex_home).ok();
     Ok(SourceSignatures {
-        codex_db_mtime_ms: file_modified_ms(
-            find_latest_state_db(&paths.codex_home).ok().as_deref(),
-        )?,
+        codex_db_path: codex_db_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        codex_db_mtime_ms: file_modified_ms(codex_db_path.as_deref())?,
         extra_codex_db_signatures: collect_extra_codex_signatures(&paths.extra_codex_homes)?,
     })
 }
@@ -543,8 +976,32 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     unique
 }
 
+fn cache_key_for_path(path: &Path) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in path.display().to_string().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+#[derive(Debug)]
+struct StateDbMatch {
+    priority: usize,
+    number: u64,
+    path: PathBuf,
+}
+
+#[derive(Debug)]
+struct StateDbCandidate {
+    priority: usize,
+    latest_timestamp: Option<i64>,
+    modified_ms: u128,
+    path: PathBuf,
+}
+
 fn find_latest_state_db(codex_home: &Path) -> Result<PathBuf> {
-    let mut matches: Vec<(usize, u64, PathBuf)> = Vec::new();
+    let mut matches: Vec<StateDbMatch> = Vec::new();
 
     for (priority, dir) in state_db_search_dirs(codex_home).into_iter().enumerate() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -561,22 +1018,71 @@ fn find_latest_state_db(codex_home: &Path) -> Result<PathBuf> {
                 .and_then(|suffix| suffix.strip_suffix(".sqlite"))
                 .and_then(|suffix| suffix.parse::<u64>().ok())
             {
-                matches.push((priority, number, entry.path()));
+                matches.push(StateDbMatch {
+                    priority,
+                    number,
+                    path: entry.path(),
+                });
             }
         }
     }
 
-    matches.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    matches
-        .into_iter()
-        .next()
-        .map(|(_, _, path)| path)
+    let latest_number = matches
+        .iter()
+        .map(|candidate| candidate.number)
+        .max()
         .ok_or_else(|| {
             anyhow!(
                 "No state_*.sqlite database found in {} or its sqlite directory",
                 codex_home.display()
             )
+        })?;
+
+    let mut candidates = Vec::new();
+    for db_match in matches
+        .into_iter()
+        .filter(|db_match| db_match.number == latest_number)
+    {
+        candidates.push(StateDbCandidate {
+            priority: db_match.priority,
+            latest_timestamp: state_db_latest_timestamp(&db_match.path)?,
+            modified_ms: file_modified_ms(Some(&db_match.path))?.unwrap_or(0),
+            path: db_match.path,
+        });
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .latest_timestamp
+            .cmp(&left.latest_timestamp)
+            .then_with(|| right.modified_ms.cmp(&left.modified_ms))
+            .then_with(|| left.priority.cmp(&right.priority))
+    });
+
+    candidates
+        .into_iter()
+        .next()
+        .map(|candidate| candidate.path)
+        .ok_or_else(|| {
+            anyhow!(
+                "No state_{}.sqlite database candidates found",
+                latest_number
+            )
         })
+}
+
+fn state_db_latest_timestamp(db_path: &Path) -> Result<Option<i64>> {
+    let db = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("Failed to open Codex database {}", db_path.display()))?;
+    db.query_row("SELECT MAX(updated_at) FROM threads", [], |row| {
+        row.get::<_, Option<i64>>(0)
+    })
+    .with_context(|| {
+        format!(
+            "Failed to query Codex latest timestamp in {}",
+            db_path.display()
+        )
+    })
 }
 
 fn state_db_search_dirs(codex_home: &Path) -> Vec<PathBuf> {
@@ -673,6 +1179,7 @@ mod tests {
             codex_home: root.path().join(".codex"),
             extra_codex_homes: Vec::new(),
             cache_path: root.path().join(".cache").join("panel-snapshot-v2.json"),
+            token_index_dir: root.path().join(".cache").join("token-window-index-v1"),
         }
     }
 
@@ -692,6 +1199,14 @@ mod tests {
         archived_tokens: i64,
     ) -> Result<()> {
         fs::create_dir_all(codex_home)?;
+        write_rollout_events(
+            &codex_home.join("active-session.jsonl"),
+            &[("2026-03-22T10:00:00+08:00", active_tokens)],
+        )?;
+        write_rollout_events(
+            &codex_home.join("archived-session.jsonl"),
+            &[("2026-03-20T09:00:00+08:00", archived_tokens)],
+        )?;
 
         let db = Connection::open(codex_home.join("state_1.sqlite"))?;
         db.execute_batch(
@@ -736,7 +1251,10 @@ mod tests {
             ",
             params![
                 "thread-1",
-                codex_home.join("session.jsonl").display().to_string(),
+                codex_home
+                    .join("active-session.jsonl")
+                    .display()
+                    .to_string(),
                 unix("2026-03-22T09:50:00+08:00"),
                 unix("2026-03-22T10:00:00+08:00"),
                 active_tokens,
@@ -755,13 +1273,43 @@ mod tests {
             ",
             params![
                 "thread-2",
-                codex_home.join("session.jsonl").display().to_string(),
+                codex_home
+                    .join("archived-session.jsonl")
+                    .display()
+                    .to_string(),
                 unix("2026-03-20T09:00:00+08:00"),
                 unix("2026-03-20T09:00:00+08:00"),
                 archived_tokens,
                 unix("2026-03-21T09:00:00+08:00"),
             ],
         )?;
+
+        Ok(())
+    }
+
+    fn write_rollout_events(path: &Path, events: &[(&str, i64)]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let mut lines = String::new();
+        for (timestamp, tokens) in events {
+            let line = serde_json::json!({
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {
+                            "total_tokens": tokens
+                        }
+                    }
+                }
+            });
+            lines.push_str(&line.to_string());
+            lines.push('\n');
+        }
+        fs::write(path, lines)?;
 
         Ok(())
     }
@@ -832,19 +1380,165 @@ mod tests {
     }
 
     #[test]
-    fn read_codex_source_prefers_nested_sqlite_state_db() -> Result<()> {
+    fn read_codex_source_selects_freshest_state_db_for_same_generation() -> Result<()> {
         let root = TempDir::new()?;
         let codex_home = root.path().join(".codex");
         create_codex_fixture_at(&codex_home, 200, 100)?;
         create_codex_fixture_at(&codex_home.join("sqlite"), 900, 100)?;
+        let db = Connection::open(codex_home.join("state_1.sqlite"))?;
+        db.execute(
+            "UPDATE threads SET updated_at = ?1 WHERE id = ?2",
+            params![unix("2026-03-22T11:00:00+08:00"), "thread-1"],
+        )?;
 
-        let snapshot = read_codex_source(&codex_home, &[], test_now())?;
+        let snapshot = read_codex_source(
+            &codex_home,
+            &[],
+            test_now(),
+            &root.path().join(".cache").join("token-window-index-v1"),
+            true,
+        )?;
 
-        assert_eq!(snapshot.total_tokens, 1_000);
-        assert_eq!(snapshot.tokens_today, 900);
-        assert_eq!(snapshot.tokens_week, 1_000);
+        assert_eq!(snapshot.total_tokens, 300);
+        assert_eq!(snapshot.tokens_today, 200);
+        assert_eq!(snapshot.tokens_week, 300);
 
         Ok(())
+    }
+
+    #[test]
+    fn token_windows_use_token_event_timestamps() -> Result<()> {
+        let root = TempDir::new()?;
+        let codex_home = root.path().join(".codex");
+        create_codex_fixture_at(&codex_home, 10_000, 0)?;
+        write_rollout_events(
+            &codex_home.join("active-session.jsonl"),
+            &[("2026-02-28T10:00:00+08:00", 10_000)],
+        )?;
+
+        let snapshot = read_codex_source(
+            &codex_home,
+            &[],
+            test_now(),
+            &root.path().join(".cache").join("token-window-index-v1"),
+            true,
+        )?;
+
+        assert_eq!(snapshot.total_tokens, 10_000);
+        assert_eq!(snapshot.tokens_today, 0);
+        assert_eq!(snapshot.tokens_week, 0);
+        assert_eq!(snapshot.tokens_month, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn token_windows_read_archived_rollout_files() -> Result<()> {
+        let root = TempDir::new()?;
+        let codex_home = root.path().join(".codex");
+        create_codex_fixture_at(&codex_home, 200, 100)?;
+        fs::create_dir_all(codex_home.join("archived_sessions"))?;
+        fs::rename(
+            codex_home.join("active-session.jsonl"),
+            codex_home
+                .join("archived_sessions")
+                .join("active-session.jsonl"),
+        )?;
+
+        let snapshot = read_codex_source(
+            &codex_home,
+            &[],
+            test_now(),
+            &root.path().join(".cache").join("token-window-index-v1"),
+            true,
+        )?;
+
+        assert_eq!(snapshot.total_tokens, 300);
+        assert_eq!(snapshot.tokens_today, 200);
+        assert_eq!(snapshot.tokens_week, 300);
+        assert_eq!(snapshot.tokens_month, 300);
+
+        Ok(())
+    }
+
+    #[test]
+    fn token_windows_ignore_rate_limit_only_token_count_events() -> Result<()> {
+        let root = TempDir::new()?;
+        let rollout_path = root.path().join("session.jsonl");
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-22T09:59:00+08:00","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex"}}}
+{"timestamp":"2026-03-22T10:00:00+08:00","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":42}}}}
+"#,
+        )?;
+
+        let totals = read_rollout_token_windows(&rollout_path, &calendar_window(test_now()))?;
+
+        assert_eq!(totals.tokens_today, 42);
+        assert_eq!(totals.tokens_week, 42);
+        assert_eq!(totals.tokens_month, 42);
+
+        Ok(())
+    }
+
+    #[test]
+    fn token_windows_prefer_last_usage_deltas() -> Result<()> {
+        let root = TempDir::new()?;
+        let rollout_path = root.path().join("session.jsonl");
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-22T09:00:00+08:00","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":100},"last_token_usage":{"total_tokens":100}}}}
+{"timestamp":"2026-03-22T10:00:00+08:00","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":150},"last_token_usage":{"total_tokens":150}}}}
+{"timestamp":"2026-03-22T11:00:00+08:00","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":0},"last_token_usage":{"total_tokens":25}}}}
+{"timestamp":"2026-03-22T12:00:00+08:00","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":200},"last_token_usage":{"total_tokens":200}}}}
+"#,
+        )?;
+
+        let totals = read_rollout_token_windows(&rollout_path, &calendar_window(test_now()))?;
+
+        assert_eq!(totals.tokens_today, 475);
+        assert_eq!(totals.tokens_week, 475);
+        assert_eq!(totals.tokens_month, 475);
+
+        Ok(())
+    }
+
+    #[test]
+    fn token_windows_reject_total_only_usage_events() -> Result<()> {
+        let root = TempDir::new()?;
+        let rollout_path = root.path().join("session.jsonl");
+        fs::write(
+            &rollout_path,
+            r#"{"timestamp":"2026-03-22T10:00:00+08:00","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":150}}}}
+"#,
+        )?;
+
+        let error = read_rollout_token_windows(&rollout_path, &calendar_window(test_now()))
+            .expect_err("total-only usage cannot be windowed without a baseline");
+
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to read Codex token_count usage")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn token_window_totals_are_capped_by_thread_tokens_used() {
+        let totals = cap_token_window_totals(
+            TokenWindowTotals {
+                tokens_today: 500,
+                tokens_week: 700,
+                tokens_month: 1_000,
+            },
+            300,
+        );
+
+        assert_eq!(totals.tokens_today, 300);
+        assert_eq!(totals.tokens_week, 300);
+        assert_eq!(totals.tokens_month, 300);
     }
 
     #[test]
@@ -909,6 +1603,54 @@ mod tests {
     }
 
     #[test]
+    fn no_cache_does_not_return_stale_snapshot() -> Result<()> {
+        let root = TempDir::new()?;
+        create_codex_fixture(&root)?;
+        let paths = build_test_paths(&root);
+
+        let snapshot = load_snapshot(&SnapshotOptions {
+            now: test_now(),
+            use_cache: true,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths: paths.clone(),
+        })?;
+        assert_eq!(snapshot.total_tokens, 300);
+
+        fs::remove_file(&paths.codex_home.join("state_1.sqlite"))?;
+
+        let error = load_snapshot(&SnapshotOptions {
+            now: test_now() + Duration::seconds(20),
+            use_cache: false,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths,
+        })
+        .expect_err("no-cache should not return stale cache data");
+
+        assert!(error.to_string().contains("No panel sources are available"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn no_cache_does_not_write_token_window_index() -> Result<()> {
+        let root = TempDir::new()?;
+        create_codex_fixture(&root)?;
+        let paths = build_test_paths(&root);
+
+        let snapshot = build_fresh_snapshot(&SnapshotOptions {
+            now: test_now(),
+            use_cache: false,
+            ttl: StdDuration::from_secs(CACHE_TTL_SECONDS),
+            paths: paths.clone(),
+        })?;
+
+        assert_eq!(snapshot.total_tokens, 300);
+        assert!(!paths.token_index_dir.exists());
+
+        Ok(())
+    }
+
+    #[test]
     fn format_token_count_inserts_grouping_separators() {
         assert_eq!(format_token_count(5_335_479_211), "5,335,479,211");
     }
@@ -929,6 +1671,16 @@ mod tests {
 
         let after = collect_source_signatures(&paths)?;
         assert_ne!(before.codex_db_mtime_ms, after.codex_db_mtime_ms);
+        assert_eq!(
+            before.codex_db_path,
+            Some(
+                paths
+                    .codex_home
+                    .join("state_1.sqlite")
+                    .display()
+                    .to_string()
+            )
+        );
 
         Ok(())
     }
