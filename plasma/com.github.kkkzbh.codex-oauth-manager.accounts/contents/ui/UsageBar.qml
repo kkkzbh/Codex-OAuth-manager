@@ -4,6 +4,8 @@ import org.kde.kirigami as Kirigami
 Item {
     id: bar
 
+    Kirigami.Theme.inherit: false
+
     property real percent: 0
     property color trackColor: Qt.rgba(Kirigami.Theme.textColor.r,
                                        Kirigami.Theme.textColor.g,
